@@ -130,9 +130,11 @@ def api_bars(
     limit: int = Query(default=260, ge=1, le=2000),
     start_date: str | None = Query(default=None),
     end_date: str | None = Query(default=None),
+    before: str | None = Query(default=None),
 ):
+    before_query = _parse_before_query(before)
     with connect() as conn:
-        return get_bars(conn, symbol.lower(), timeframe, limit, _parse_date_query(start_date), _parse_date_query(end_date))
+        return get_bars(conn, symbol.lower(), timeframe, limit, _parse_date_query(start_date), _parse_date_query(end_date), before_query)
 
 
 @app.get("/api/chart", response_model=ChartDataResponse)
@@ -143,9 +145,11 @@ def api_chart_data(
     threshold_pct: float = Query(default=5.0, ge=0.1, le=50.0),
     start_date: str | None = Query(default=None),
     end_date: str | None = Query(default=None),
+    before: str | None = Query(default=None),
 ) -> ChartDataResponse:
     normalized_symbol = symbol.lower()
     normalized_timeframe = timeframe.upper()
+    before_query = _parse_before_query(before)
     with connect() as conn:
         bars = get_bars(
             conn,
@@ -154,6 +158,7 @@ def api_chart_data(
             limit,
             _parse_date_query(start_date),
             _parse_date_query(end_date),
+            before_query,
         )
         annotations = list_annotations(conn, normalized_symbol, normalized_timeframe)
     return ChartDataResponse(
@@ -171,9 +176,11 @@ def api_chan_analysis(
     limit: int = Query(default=260, ge=20, le=2000),
     start_date: str | None = Query(default=None),
     end_date: str | None = Query(default=None),
+    before: str | None = Query(default=None),
 ) -> ChanAnalysisResponse:
+    before_query = _parse_before_query(before)
     with connect() as conn:
-        bars = get_bars(conn, symbol.lower(), timeframe, limit, _parse_date_query(start_date), _parse_date_query(end_date))
+        bars = get_bars(conn, symbol.lower(), timeframe, limit, _parse_date_query(start_date), _parse_date_query(end_date), before_query)
     return detect_fractals(symbol.lower(), timeframe.upper(), bars)
 
 
@@ -185,9 +192,11 @@ def api_wave_analysis(
     threshold_pct: float = Query(default=5.0, ge=0.1, le=50.0),
     start_date: str | None = Query(default=None),
     end_date: str | None = Query(default=None),
+    before: str | None = Query(default=None),
 ) -> WaveAnalysisResponse:
+    before_query = _parse_before_query(before)
     with connect() as conn:
-        bars = get_bars(conn, symbol.lower(), timeframe, limit, _parse_date_query(start_date), _parse_date_query(end_date))
+        bars = get_bars(conn, symbol.lower(), timeframe, limit, _parse_date_query(start_date), _parse_date_query(end_date), before_query)
     return detect_zigzag_waves(symbol.lower(), timeframe.upper(), bars, threshold_pct)
 
 
@@ -254,3 +263,18 @@ def _parse_date_query(value: str | None):
         return date.fromisoformat(value)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"日期格式无效：{value}") from exc
+
+
+def _parse_before_query(value: str | None) -> str | None:
+    if not value:
+        return None
+    from datetime import date, datetime
+
+    normalized = value.strip()
+    try:
+        if "T" in normalized or " " in normalized:
+            parsed = datetime.fromisoformat(normalized.replace("T", " "))
+            return parsed.isoformat(timespec="minutes")
+        return date.fromisoformat(normalized).isoformat()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"before 格式无效：{value}") from exc

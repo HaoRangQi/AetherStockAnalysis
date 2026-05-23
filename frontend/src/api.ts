@@ -137,6 +137,7 @@ export async function searchSymbols(query: string): Promise<SymbolRecord[]> {
 export type DateRange = {
   startDate?: string;
   endDate?: string;
+  before?: string;
   limit?: number;
 };
 
@@ -212,6 +213,9 @@ function rangeQuery(range: DateRange): string {
   }
   if (range.endDate) {
     params.set("end_date", range.endDate);
+  }
+  if (range.before) {
+    params.set("before", range.before);
   }
   return `&${params.toString()}`;
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   CandlestickChart,
@@ -78,6 +78,10 @@ export function App() {
   const [analysis, setAnalysis] = useState<ChanAnalysis | null>(null);
   const [waveAnalysis, setWaveAnalysis] = useState<WaveAnalysis | null>(null);
   const [annotations, setAnnotations] = useState<AnnotationRecord[]>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [hasMoreHistory, setHasMoreHistory] = useState(true);
+  const [loadedWindowStart, setLoadedWindowStart] = useState<string | null>(null);
+  const [loadedWindowEnd, setLoadedWindowEnd] = useState<string | null>(null);
   const [ruleProfiles, setRuleProfiles] = useState<RuleProfile[]>([]);
   const [annotationDraft, setAnnotationDraft] = useState("");
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
@@ -92,11 +96,13 @@ export function App() {
     fractals: true,
     wave: true,
   });
+  const historyRequestRef = useRef<string | null>(null);
 
   const selectedTimeframe = timeframes.find((item) => item.value === timeframe) ?? timeframes[5];
   const selectedName = selectedSymbol ? displayName(selectedSymbol) : "等待导入数据";
   const selectedCode = selectedSymbol ? selectedSymbol.symbol.toUpperCase() : "";
   const minuteFrameSelected = minuteFrames.has(timeframe);
+  const fitContentToken = `${selectedSymbol?.symbol ?? "none"}:${timeframe}:${dateStart}:${dateEnd}`;
 
   const selectSymbol = useCallback(
     (symbol: SymbolRecord) => {
@@ -163,6 +169,9 @@ export function App() {
           setAnalysis(result.chan);
           setWaveAnalysis(result.wave);
           setAnnotations(result.annotations);
+          setLoadedWindowStart(result.bars[0]?.trade_date ?? null);
+          setLoadedWindowEnd(result.bars.at(-1)?.trade_date ?? null);
+          setHasMoreHistory(hasOlderHistory(result.bars[0]?.trade_date, selectedSymbol.first_date));
           setChartStatus(
             result.bars.length > 0
               ? `已加载 ${result.bars.length.toLocaleString()} 根 K 线`
@@ -177,6 +186,9 @@ export function App() {
           setAnalysis(null);
           setWaveAnalysis(null);
           setAnnotations([]);
+          setLoadedWindowStart(null);
+          setLoadedWindowEnd(null);
+          setHasMoreHistory(false);
           setChartStatus("K 线加载失败");
           setError(formatError(err));
         }
@@ -186,6 +198,58 @@ export function App() {
       cancelled = true;
     };
   }, [selectedSymbol, timeframe, dateStart, dateEnd]);
+
+  const loadMoreHistory = useCallback(async () => {
+    const oldestLoaded = bars[0]?.trade_date;
+    if (!selectedSymbol || !oldestLoaded || isLoadingHistory || !hasMoreHistory) {
+      return;
+    }
+    const requestKey = `${selectedSymbol.symbol}:${timeframe}:${oldestLoaded}`;
+    if (historyRequestRef.current === requestKey) {
+      return;
+    }
+    historyRequestRef.current = requestKey;
+    setIsLoadingHistory(true);
+    try {
+      const older = await getChartData(selectedSymbol.symbol, timeframe, { before: oldestLoaded, limit: 260 });
+      if (older.bars.length === 0 || older.bars[0]?.trade_date === oldestLoaded) {
+        setHasMoreHistory(false);
+        setChartStatus("已加载到本地最早数据");
+        return;
+      }
+
+      const mergedBars = mergeBars(older.bars, bars);
+      const mergedStart = mergedBars[0]?.trade_date;
+      const mergedEnd = mergedBars.at(-1)?.trade_date;
+      setBars(mergedBars);
+      setLoadedWindowStart(mergedStart ?? null);
+      setLoadedWindowEnd(mergedEnd ?? null);
+      setHasMoreHistory(hasOlderHistory(mergedStart, selectedSymbol.first_date));
+      setChartStatus(`已加载 ${mergedBars.length.toLocaleString()} 根 K 线`);
+
+      if (mergedStart && mergedEnd && mergedBars.length <= 2000) {
+        const refreshed = await getChartData(selectedSymbol.symbol, timeframe, {
+          startDate: dateOnly(mergedStart),
+          endDate: dateOnly(mergedEnd),
+          limit: Math.min(Math.max(mergedBars.length + 20, 520), 2000),
+        });
+        const refreshedBars = mergeBars(refreshed.bars);
+        setBars(refreshedBars);
+        setAnalysis(refreshed.chan);
+        setWaveAnalysis(refreshed.wave);
+        setAnnotations(refreshed.annotations);
+        setLoadedWindowStart(refreshedBars[0]?.trade_date ?? mergedStart);
+        setLoadedWindowEnd(refreshedBars.at(-1)?.trade_date ?? mergedEnd);
+        setChartStatus(`已加载 ${refreshedBars.length.toLocaleString()} 根 K 线`);
+      }
+    } catch (err) {
+      setError(formatError(err));
+      setChartStatus("历史数据加载失败");
+    } finally {
+      setIsLoadingHistory(false);
+      historyRequestRef.current = null;
+    }
+  }, [bars, hasMoreHistory, isLoadingHistory, selectedSymbol, timeframe]);
 
   useEffect(() => {
     void loadRuleProfiles();
@@ -440,6 +504,10 @@ export function App() {
             waveAnalysis={waveAnalysis}
             layers={layers}
             theme={theme}
+            fitContentToken={fitContentToken}
+            hasMoreHistory={hasMoreHistory}
+            isLoadingHistory={isLoadingHistory}
+            onLoadMoreHistory={loadMoreHistory}
             emptyMessage={
               minuteFrameSelected
                 ? "当前数据源尚未导入这个分钟级别的数据；请先在通达信下载分钟线后重新导入行情数据。"
@@ -469,7 +537,9 @@ export function App() {
           <div>
             <strong>时间范围</strong>
             <span>
-              {dateStart || "-"} 至 {dateEnd || "-"}
+              {(loadedWindowStart ?? dateStart) || "-"} 至 {(loadedWindowEnd ?? dateEnd) || "-"}
+              {isLoadingHistory && " · 正在加载历史"}
+              {!hasMoreHistory && bars.length > 0 && " · 已到最早"}
             </span>
           </div>
           <div>
@@ -862,6 +932,31 @@ function analysisTypeLabel(value: string): string {
     wave: "波浪",
   };
   return labels[value] ?? value;
+}
+
+function mergeBars(...chunks: BarRecord[][]): BarRecord[] {
+  const byTime = new Map<string, BarRecord>();
+  for (const chunk of chunks) {
+    for (const bar of chunk) {
+      byTime.set(bar.trade_date, bar);
+    }
+  }
+  return Array.from(byTime.values()).sort((left, right) => compareTime(left.trade_date, right.trade_date));
+}
+
+function compareTime(left: string, right: string): number {
+  return left.localeCompare(right);
+}
+
+function dateOnly(value: string): string {
+  return value.slice(0, 10);
+}
+
+function hasOlderHistory(oldestLoaded: string | undefined, firstAvailable: string | null | undefined): boolean {
+  if (!oldestLoaded || !firstAvailable) {
+    return false;
+  }
+  return dateOnly(oldestLoaded) > firstAvailable;
 }
 
 function readDefaultRangeMonths(): number {

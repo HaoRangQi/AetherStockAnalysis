@@ -3,6 +3,7 @@ import {
   CandlestickData,
   ColorType,
   CandlestickSeries,
+  LogicalRange,
   HistogramSeries,
   HistogramData,
   IChartApi,
@@ -25,9 +26,24 @@ type Props = {
   };
   theme: "light" | "dark";
   emptyMessage: string;
+  fitContentToken: string;
+  hasMoreHistory: boolean;
+  isLoadingHistory: boolean;
+  onLoadMoreHistory: () => void;
 };
 
-export function KLineChart({ bars, analysis, waveAnalysis, layers, theme, emptyMessage }: Props) {
+export function KLineChart({
+  bars,
+  analysis,
+  waveAnalysis,
+  layers,
+  theme,
+  emptyMessage,
+  fitContentToken,
+  hasMoreHistory,
+  isLoadingHistory,
+  onLoadMoreHistory,
+}: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -35,13 +51,22 @@ export function KLineChart({ bars, analysis, waveAnalysis, layers, theme, emptyM
   const topSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const bottomSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const waveSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const historyStateRef = useRef({ hasMoreHistory, isLoadingHistory, onLoadMoreHistory });
+  const fittedTokenRef = useRef<string | null>(null);
+  const previousBarsRef = useRef<BarRecord[]>([]);
+  const userNavigatedRef = useRef(false);
 
   useEffect(() => {
-    if (!containerRef.current) {
+    historyStateRef.current = { hasMoreHistory, isLoadingHistory, onLoadMoreHistory };
+  }, [hasMoreHistory, isLoadingHistory, onLoadMoreHistory]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
       return;
     }
     const palette = chartPalette("light");
-    const chart = createChart(containerRef.current, {
+    const chart = createChart(container, {
       layout: {
         background: { type: ColorType.Solid, color: palette.background },
         textColor: palette.text,
@@ -106,17 +131,39 @@ export function KLineChart({ bars, analysis, waveAnalysis, layers, theme, emptyM
     waveSeriesRef.current = waveSeries;
 
     const observer = new ResizeObserver(() => {
-      if (!containerRef.current) {
-        return;
-      }
       chart.applyOptions({
-        width: containerRef.current.clientWidth,
-        height: containerRef.current.clientHeight,
+        width: container.clientWidth,
+        height: container.clientHeight,
       });
     });
-    observer.observe(containerRef.current);
+    observer.observe(container);
+    const markUserNavigated = () => {
+      userNavigatedRef.current = true;
+    };
+    container.addEventListener("pointerdown", markUserNavigated);
+    container.addEventListener("wheel", markUserNavigated, { passive: true });
+    container.addEventListener("touchstart", markUserNavigated, { passive: true });
+    const logicalRangeHandler = (range: LogicalRange | null) => {
+      const candleSeriesForRange = candleSeriesRef.current;
+      if (!range || !candleSeriesForRange) {
+        return;
+      }
+      const { hasMoreHistory: canLoad, isLoadingHistory: loading, onLoadMoreHistory: loadMore } = historyStateRef.current;
+      if (!canLoad || loading || !userNavigatedRef.current) {
+        return;
+      }
+      const barsInfo = candleSeriesForRange.barsInLogicalRange(range);
+      if (barsInfo && barsInfo.barsBefore < 50) {
+        loadMore();
+      }
+    };
+    chart.timeScale().subscribeVisibleLogicalRangeChange(logicalRangeHandler);
 
     return () => {
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(logicalRangeHandler);
+      container.removeEventListener("pointerdown", markUserNavigated);
+      container.removeEventListener("wheel", markUserNavigated);
+      container.removeEventListener("touchstart", markUserNavigated);
       observer.disconnect();
       chart.remove();
     };
@@ -155,6 +202,14 @@ export function KLineChart({ bars, analysis, waveAnalysis, layers, theme, emptyM
     if (!candleSeries || !volumeSeries || !topSeries || !bottomSeries || !waveSeries) {
       return;
     }
+    const previousBars = previousBarsRef.current;
+    const visibleRangeBeforeUpdate = chartRef.current?.timeScale().getVisibleLogicalRange() ?? null;
+    const prependedCount =
+      previousBars.length > 0 &&
+      bars.length > previousBars.length &&
+      bars.at(-1)?.trade_date === previousBars.at(-1)?.trade_date
+        ? bars.length - previousBars.length
+        : 0;
     const candles: CandlestickData[] = bars.map((bar) => ({
       time: toChartTime(bar.trade_date),
       open: bar.open,
@@ -193,8 +248,22 @@ export function KLineChart({ bars, analysis, waveAnalysis, layers, theme, emptyM
           }))
         : [],
     );
-    chartRef.current?.timeScale().fitContent();
+    if (visibleRangeBeforeUpdate && prependedCount > 0) {
+      chartRef.current?.timeScale().setVisibleLogicalRange({
+        from: visibleRangeBeforeUpdate.from + prependedCount,
+        to: visibleRangeBeforeUpdate.to + prependedCount,
+      });
+    }
+    previousBarsRef.current = bars;
   }, [bars, analysis, waveAnalysis, layers]);
+
+  useEffect(() => {
+    if (bars.length > 0 && fittedTokenRef.current !== fitContentToken) {
+      userNavigatedRef.current = false;
+      chartRef.current?.timeScale().fitContent();
+      fittedTokenRef.current = fitContentToken;
+    }
+  }, [fitContentToken, bars.length]);
 
   return (
     <div className="chart-frame">

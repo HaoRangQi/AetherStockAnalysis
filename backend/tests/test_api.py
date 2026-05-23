@@ -65,8 +65,15 @@ def test_import_updates_names_and_chart_includes_minute_data(tmp_path: Path, mon
     cache = source.parent / "T0002" / "hq_cache"
     cache.mkdir(parents=True)
 
-    day_record = struct.pack("<IIIIIfII", 20260522, 1000, 1050, 990, 1030, 123456.0, 7890, 0)
-    (source / "sh" / "lday" / "sh600000.day").write_bytes(day_record)
+    day_records = [
+        struct.pack("<IIIIIfII", 20260511, 850, 900, 840, 890, 90000.0, 6800, 0),
+        struct.pack("<IIIIIfII", 20260518, 900, 950, 890, 930, 100000.0, 7000, 0),
+        struct.pack("<IIIIIfII", 20260519, 930, 980, 920, 970, 110000.0, 7200, 0),
+        struct.pack("<IIIIIfII", 20260520, 970, 1010, 960, 1000, 120000.0, 7400, 0),
+        struct.pack("<IIIIIfII", 20260521, 1000, 1040, 990, 1020, 130000.0, 7600, 0),
+        struct.pack("<IIIIIfII", 20260522, 1000, 1050, 990, 1030, 123456.0, 7890, 0),
+    ]
+    (source / "sh" / "lday" / "sh600000.day").write_bytes(b"".join(day_records))
     raw_date = (2026 - 2004) * 2048 + 5 * 100 + 22
     minute_records = [
         struct.pack("<HHfffffII", raw_date, 9 * 60 + 35, 10.0, 10.5, 9.9, 10.3, 1000.0, 100, 0),
@@ -83,7 +90,7 @@ def test_import_updates_names_and_chart_includes_minute_data(tmp_path: Path, mon
     client = TestClient(app)
     imported = client.post("/api/imports/daily", json={"path": str(source), "markets": ["sh"]})
     assert imported.status_code == 200
-    assert imported.json()["bars_imported"] == 1
+    assert imported.json()["bars_imported"] == 6
     assert imported.json()["minute_bars_imported"] == 2
 
     symbols = client.get("/api/symbols?q=600000&limit=5")
@@ -109,3 +116,30 @@ def test_import_updates_names_and_chart_includes_minute_data(tmp_path: Path, mon
     skipped_market = client.get("/api/chart?symbol=sz000001&timeframe=5m&start_date=2026-05-22&end_date=2026-05-22")
     assert skipped_market.status_code == 200
     assert skipped_market.json()["bars"] == []
+
+    latest_daily = client.get("/api/chart?symbol=sh600000&timeframe=D&limit=2")
+    assert latest_daily.status_code == 200
+    latest_daily_bars = latest_daily.json()["bars"]
+    assert [bar["trade_date"] for bar in latest_daily_bars] == ["2026-05-21", "2026-05-22"]
+
+    older_daily = client.get("/api/chart?symbol=sh600000&timeframe=D&limit=2&before=2026-05-21")
+    assert older_daily.status_code == 200
+    assert [bar["trade_date"] for bar in older_daily.json()["bars"]] == ["2026-05-19", "2026-05-20"]
+
+    older_minute = client.get("/api/chart?symbol=sh600000&timeframe=5m&limit=1&before=2026-05-22T09:40")
+    assert older_minute.status_code == 200
+    older_minute_bars = older_minute.json()["bars"]
+    assert len(older_minute_bars) == 1
+    assert older_minute_bars[0]["trade_date"] == "2026-05-22T09:35"
+
+    older_aggregated = client.get("/api/chart?symbol=sh600000&timeframe=15m&limit=1&before=2026-05-22T10:00")
+    assert older_aggregated.status_code == 200
+    assert [bar["trade_date"] for bar in older_aggregated.json()["bars"]] == ["2026-05-22T09:45"]
+
+    older_weekly = client.get("/api/chart?symbol=sh600000&timeframe=W&limit=1&before=2026-05-22")
+    assert older_weekly.status_code == 200
+    assert [bar["trade_date"] for bar in older_weekly.json()["bars"]] == ["2026-05-11"]
+
+    invalid_before = client.get("/api/chart?symbol=sh600000&timeframe=D&before=not-a-date")
+    assert invalid_before.status_code == 400
+    assert "before 格式无效" in invalid_before.json()["detail"]

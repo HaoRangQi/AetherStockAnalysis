@@ -380,12 +380,13 @@ def get_bars(
     limit: int = 260,
     start_date: date | None = None,
     end_date: date | None = None,
+    before: str | None = None,
 ) -> list[BarRecord]:
     timeframe = timeframe.upper()
-    date_filters, date_params = _date_filter_sql(start_date, end_date)
+    date_filters, date_params = _date_filter_sql(start_date, end_date, before)
     minute_map = {"1M": 1, "5M": 5, "15M": 15, "30M": 30, "60M": 60}
     if timeframe in minute_map:
-        return get_minute_bars(conn, symbol, timeframe, minute_map[timeframe], limit, start_date, end_date)
+        return get_minute_bars(conn, symbol, timeframe, minute_map[timeframe], limit, start_date, end_date, before)
 
     if timeframe == "D":
         query = """
@@ -402,8 +403,10 @@ def get_bars(
 
     if timeframe in {"W", "M"}:
         bucket = "time_bucket(INTERVAL '1 week', trade_date)" if timeframe == "W" else "time_bucket(INTERVAL '1 month', trade_date)"
+        grouped_date_filters, grouped_date_params = _date_filter_sql(start_date, end_date)
+        before_date = _parse_before_date(before) if before else None
         rows = conn.execute(
-            f"""
+            """
             WITH base AS (
                 SELECT *, {bucket} AS bucket_date
                 FROM bars_daily
@@ -426,10 +429,11 @@ def get_bars(
             )
             SELECT symbol, ? AS timeframe, trade_date, open, high, low, close, amount, volume
             FROM grouped
+            WHERE (? IS NULL OR trade_date < ?::DATE)
             ORDER BY trade_date DESC
             LIMIT ?
-            """.format(bucket=bucket, date_filters=date_filters),
-            [symbol.lower(), *date_params, timeframe, limit],
+            """.format(bucket=bucket, date_filters=grouped_date_filters),
+            [symbol.lower(), *grouped_date_params, timeframe, before_date, before_date, limit],
         ).fetchall()
         rows.reverse()
         return [BarRecord(**_bar_row(row)) for row in rows]
@@ -445,8 +449,9 @@ def get_minute_bars(
     limit: int = 260,
     start_date: date | None = None,
     end_date: date | None = None,
+    before: str | None = None,
 ) -> list[BarRecord]:
-    date_filters, date_params = _minute_date_filter_sql(start_date, end_date)
+    date_filters, date_params = _minute_date_filter_sql(start_date, end_date, before)
     if interval_minutes in {1, 5}:
         rows = conn.execute(
             """
@@ -463,6 +468,8 @@ def get_minute_bars(
         rows.reverse()
         return [BarRecord(**_bar_row(row)) for row in rows]
 
+    grouped_date_filters, grouped_date_params = _minute_date_filter_sql(start_date, end_date)
+    normalized_before = _normalize_before_timestamp(before)
     rows = conn.execute(
         """
         WITH base AS (
@@ -496,10 +503,22 @@ def get_minute_bars(
         )
         SELECT symbol, ? AS timeframe, bucket_time, open, high, low, close, amount, volume
         FROM grouped
+        WHERE (? IS NULL OR bucket_time < ?::TIMESTAMP)
         ORDER BY bucket_time DESC
         LIMIT ?
-        """.format(date_filters=date_filters),
-        [interval_minutes, interval_minutes, interval_minutes, interval_minutes, symbol.lower(), *date_params, timeframe, limit],
+        """.format(date_filters=grouped_date_filters),
+        [
+            interval_minutes,
+            interval_minutes,
+            interval_minutes,
+            interval_minutes,
+            symbol.lower(),
+            *grouped_date_params,
+            timeframe,
+            normalized_before,
+            normalized_before,
+            limit,
+        ],
     ).fetchall()
     rows.reverse()
     return [BarRecord(**_bar_row(row)) for row in rows]
@@ -921,27 +940,33 @@ def _bar_row(row: tuple) -> dict:
     }
 
 
-def _date_filter_sql(start_date: date | None, end_date: date | None) -> tuple[str, list[date]]:
+def _date_filter_sql(start_date: date | None, end_date: date | None, before: str | None = None) -> tuple[str, list]:
     filters: list[str] = []
-    params: list[date] = []
+    params: list = []
     if start_date is not None:
         filters.append("AND trade_date >= ?")
         params.append(start_date)
     if end_date is not None:
         filters.append("AND trade_date <= ?")
         params.append(end_date)
+    if before:
+        filters.append("AND trade_date < ?")
+        params.append(_parse_before_date(before))
     return ("\n            " + "\n            ".join(filters) if filters else ""), params
 
 
-def _minute_date_filter_sql(start_date: date | None, end_date: date | None) -> tuple[str, list[date]]:
+def _minute_date_filter_sql(start_date: date | None, end_date: date | None, before: str | None = None) -> tuple[str, list]:
     filters: list[str] = []
-    params: list[date] = []
+    params: list = []
     if start_date is not None:
         filters.append("AND CAST(trade_time AS DATE) >= ?")
         params.append(start_date)
     if end_date is not None:
         filters.append("AND CAST(trade_time AS DATE) <= ?")
         params.append(end_date)
+    if before:
+        filters.append("AND trade_time < ?::TIMESTAMP")
+        params.append(_normalize_before_timestamp(before))
     return ("\n            " + "\n            ".join(filters) if filters else ""), params
 
 
@@ -989,6 +1014,18 @@ def _as_time_value(value) -> str | None:
     if " " in text:
         return text.replace(" ", "T")[:16]
     return text
+
+
+def _parse_before_date(value: str) -> date:
+    return date.fromisoformat(value.split("T", 1)[0])
+
+
+def _normalize_before_timestamp(value: str | None) -> str | None:
+    if not value:
+        return None
+    if "T" in value:
+        return value.replace("T", " ")[:16]
+    return f"{value} 00:00"
 
 
 def _as_datetime(value) -> datetime:
