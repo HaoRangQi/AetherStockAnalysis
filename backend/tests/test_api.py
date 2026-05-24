@@ -2,12 +2,45 @@ from __future__ import annotations
 
 from pathlib import Path
 import struct
+import time
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app import config
 from app.main import app
+
+
+def _create_tdx_fixture(tmp_path: Path) -> Path:
+    source = tmp_path / "tdx" / "vipdoc"
+    (source / "sh" / "lday").mkdir(parents=True)
+    (source / "sh" / "fzline").mkdir(parents=True)
+    (source / "sz" / "fzline").mkdir(parents=True)
+    cache = source.parent / "T0002" / "hq_cache"
+    cache.mkdir(parents=True)
+
+    day_records = [
+        struct.pack("<IIIIIfII", 20260511, 850, 900, 840, 890, 90000.0, 6800, 0),
+        struct.pack("<IIIIIfII", 20260518, 900, 950, 890, 930, 100000.0, 7000, 0),
+        struct.pack("<IIIIIfII", 20260519, 930, 980, 920, 970, 110000.0, 7200, 0),
+        struct.pack("<IIIIIfII", 20260520, 970, 1010, 960, 1000, 120000.0, 7400, 0),
+        struct.pack("<IIIIIfII", 20260521, 1000, 1040, 990, 1020, 130000.0, 7600, 0),
+        struct.pack("<IIIIIfII", 20260522, 1000, 1050, 990, 1030, 123456.0, 7890, 0),
+    ]
+    (source / "sh" / "lday" / "sh600000.day").write_bytes(b"".join(day_records))
+    raw_date = (2026 - 2004) * 2048 + 5 * 100 + 22
+    minute_records = [
+        struct.pack("<HHfffffII", raw_date, 9 * 60 + 35, 10.0, 10.5, 9.9, 10.3, 1000.0, 100, 0),
+        struct.pack("<HHfffffII", raw_date, 9 * 60 + 40, 10.3, 10.8, 10.2, 10.7, 1200.0, 120, 0),
+    ]
+    (source / "sh" / "fzline" / "sh600000.lc5").write_bytes(b"".join(minute_records))
+    (source / "sz" / "fzline" / "sz000001.lc5").write_bytes(minute_records[0])
+    tnf_record = bytearray(360)
+    tnf_record[50:56] = b"600000"
+    name = "浦发银行".encode("gb18030")
+    tnf_record[80 : 80 + len(name)] = name
+    (cache / "shs.tnf").write_bytes(tnf_record)
+    return source
 
 
 def test_rule_profiles_and_annotations(tmp_path: Path, monkeypatch) -> None:
@@ -58,34 +91,7 @@ def test_import_updates_names_and_chart_includes_minute_data(tmp_path: Path, mon
     monkeypatch.setattr(config, "APP_DIR", tmp_path)
     monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.json")
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.duckdb")
-    source = tmp_path / "tdx" / "vipdoc"
-    (source / "sh" / "lday").mkdir(parents=True)
-    (source / "sh" / "fzline").mkdir(parents=True)
-    (source / "sz" / "fzline").mkdir(parents=True)
-    cache = source.parent / "T0002" / "hq_cache"
-    cache.mkdir(parents=True)
-
-    day_records = [
-        struct.pack("<IIIIIfII", 20260511, 850, 900, 840, 890, 90000.0, 6800, 0),
-        struct.pack("<IIIIIfII", 20260518, 900, 950, 890, 930, 100000.0, 7000, 0),
-        struct.pack("<IIIIIfII", 20260519, 930, 980, 920, 970, 110000.0, 7200, 0),
-        struct.pack("<IIIIIfII", 20260520, 970, 1010, 960, 1000, 120000.0, 7400, 0),
-        struct.pack("<IIIIIfII", 20260521, 1000, 1040, 990, 1020, 130000.0, 7600, 0),
-        struct.pack("<IIIIIfII", 20260522, 1000, 1050, 990, 1030, 123456.0, 7890, 0),
-    ]
-    (source / "sh" / "lday" / "sh600000.day").write_bytes(b"".join(day_records))
-    raw_date = (2026 - 2004) * 2048 + 5 * 100 + 22
-    minute_records = [
-        struct.pack("<HHfffffII", raw_date, 9 * 60 + 35, 10.0, 10.5, 9.9, 10.3, 1000.0, 100, 0),
-        struct.pack("<HHfffffII", raw_date, 9 * 60 + 40, 10.3, 10.8, 10.2, 10.7, 1200.0, 120, 0),
-    ]
-    (source / "sh" / "fzline" / "sh600000.lc5").write_bytes(b"".join(minute_records))
-    (source / "sz" / "fzline" / "sz000001.lc5").write_bytes(minute_records[0])
-    tnf_record = bytearray(360)
-    tnf_record[50:56] = b"600000"
-    name = "浦发银行".encode("gb18030")
-    tnf_record[80 : 80 + len(name)] = name
-    (cache / "shs.tnf").write_bytes(tnf_record)
+    source = _create_tdx_fixture(tmp_path)
 
     client = TestClient(app)
     imported = client.post("/api/imports/daily", json={"path": str(source), "markets": ["sh"]})
@@ -158,6 +164,69 @@ def test_import_updates_names_and_chart_includes_minute_data(tmp_path: Path, mon
     assert coverage["15M"]["available"] is True
     assert coverage["15M"]["derived_from"] == "5 分钟聚合"
     assert any(item["title"] == "缺少深市日线" for item in health_payload["recommendations"])
+
+
+def test_import_job_succeeds_and_reports_minute_progress(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(config, "APP_DIR", tmp_path)
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.duckdb")
+    source = _create_tdx_fixture(tmp_path)
+
+    client = TestClient(app)
+    created = client.post("/api/imports/jobs", json={"path": str(source), "markets": ["sh"]})
+    assert created.status_code == 200
+    job = created.json()
+    assert job["id"]
+    assert job["status"] in {"queued", "running"}
+    assert "minute_bars_imported" in job
+
+    finished = None
+    for _ in range(50):
+        polled = client.get(f"/api/imports/jobs/{job['id']}")
+        assert polled.status_code == 200
+        payload = polled.json()
+        if payload["status"] in {"succeeded", "failed"}:
+            finished = payload
+            break
+        time.sleep(0.05)
+
+    assert finished is not None
+    assert finished["status"] == "succeeded"
+    assert finished["files_seen"] == 1
+    assert finished["files_imported"] == 1
+    assert finished["bars_imported"] == 6
+    assert finished["minute_bars_imported"] == 2
+    assert finished["symbols_imported"] == 1
+    assert finished["source_path"] == str(source)
+    assert finished["started_at"] is not None
+    assert finished["finished_at"] is not None
+
+
+def test_import_job_invalid_path_fails(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(config, "APP_DIR", tmp_path)
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.duckdb")
+
+    client = TestClient(app)
+    created = client.post("/api/imports/jobs", json={"path": str(tmp_path / "missing")})
+    assert created.status_code == 200
+    job = created.json()
+
+    finished = None
+    for _ in range(50):
+        polled = client.get(f"/api/imports/jobs/{job['id']}")
+        assert polled.status_code == 200
+        payload = polled.json()
+        if payload["status"] in {"succeeded", "failed"}:
+            finished = payload
+            break
+        time.sleep(0.05)
+
+    assert finished is not None
+    assert finished["status"] == "failed"
+    assert finished["message"] == "数据源无效：没有找到可导入的日线文件。"
+    assert finished["errors"] == ["数据源无效：没有找到可导入的日线文件。"]
+    assert finished["finished_at"] is not None
 
 
 def test_data_health_empty_database(tmp_path: Path, monkeypatch) -> None:

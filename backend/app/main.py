@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
+from threading import Lock, Thread
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +18,7 @@ from .schemas import (
     ChanAnalysisResponse,
     DataHealthResponse,
     DataSourceCandidate,
+    ImportJob,
     ImportRequest,
     ImportResult,
     RuleProfile,
@@ -40,6 +44,8 @@ from .storage import (
 from .tdx import detect_sources, inspect_source, iter_daily_files, load_symbol_name_map
 
 app = FastAPI(title="AetherStockAnalysis API", version="0.1.0")
+_IMPORT_JOBS: dict[str, ImportJob] = {}
+_IMPORT_JOBS_LOCK = Lock()
 
 app.add_middleware(
     CORSMiddleware,
@@ -93,33 +99,28 @@ def api_save_source(request: SourceRequest) -> SourceResponse:
 
 @app.post("/api/imports/daily", response_model=ImportResult)
 def api_import_daily(request: ImportRequest) -> ImportResult:
-    source_path = _resolve_source_path(request.path)
-    health = inspect_source(source_path, "导入数据源")
-    if not health.valid:
-        raise HTTPException(status_code=400, detail="数据源无效：没有找到可导入的日线文件。")
+    return _run_import(request)
 
-    files = iter_daily_files(source_path, request.markets)
-    if request.limit_files is not None:
-        files = files[: request.limit_files]
-    files_imported, bars_imported, minute_bars_imported, errors = import_daily_files(
-        source_path,
-        files,
-        request.markets,
-        request.limit_files,
+
+@app.post("/api/imports/jobs", response_model=ImportJob)
+def api_create_import_job(request: ImportRequest) -> ImportJob:
+    job = ImportJob(
+        id=uuid4().hex,
+        status="queued",
+        source_path=request.path,
+        message="导入任务已排队。",
     )
-    symbols_imported = 0
-    with connect() as conn:
-        apply_symbol_names(conn, load_symbol_name_map(source_path))
-        symbols_imported = conn.execute("SELECT count(*) FROM symbols").fetchone()[0]
-    return ImportResult(
-        source_path=str(source_path),
-        files_seen=len(files),
-        files_imported=files_imported,
-        bars_imported=bars_imported,
-        minute_bars_imported=minute_bars_imported,
-        symbols_imported=symbols_imported,
-        errors=errors[:50],
-    )
+    _save_import_job(job)
+    Thread(target=_run_import_job, args=(job.id, request), daemon=True).start()
+    return job
+
+
+@app.get("/api/imports/jobs/{job_id}", response_model=ImportJob)
+def api_get_import_job(job_id: str) -> ImportJob:
+    job = _get_import_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="导入任务不存在。")
+    return job
 
 
 @app.get("/api/symbols")
@@ -248,6 +249,110 @@ def api_list_rule_profiles(analysis_type: str | None = None) -> list[RuleProfile
 def api_create_rule_profile(request: RuleProfileCreate) -> RuleProfile:
     with connect() as conn:
         return create_rule_profile(conn, request)
+
+
+def _run_import(request: ImportRequest, progress=None) -> ImportResult:
+    source_path, files = _prepare_import(request)
+    files_imported, bars_imported, minute_bars_imported, errors = import_daily_files(
+        source_path,
+        files,
+        request.markets,
+        request.limit_files,
+        progress,
+    )
+    symbols_imported = 0
+    with connect() as conn:
+        apply_symbol_names(conn, load_symbol_name_map(source_path))
+        symbols_imported = conn.execute("SELECT count(*) FROM symbols").fetchone()[0]
+    return ImportResult(
+        source_path=str(source_path),
+        files_seen=len(files),
+        files_imported=files_imported,
+        bars_imported=bars_imported,
+        minute_bars_imported=minute_bars_imported,
+        symbols_imported=symbols_imported,
+        errors=errors[:50],
+    )
+
+
+def _prepare_import(request: ImportRequest) -> tuple[Path, list[Path]]:
+    source_path = _resolve_source_path(request.path)
+    health = inspect_source(source_path, "导入数据源")
+    if not health.valid:
+        raise HTTPException(status_code=400, detail="数据源无效：没有找到可导入的日线文件。")
+
+    files = iter_daily_files(source_path, request.markets)
+    if request.limit_files is not None:
+        files = files[: request.limit_files]
+    return source_path, files
+
+
+def _run_import_job(job_id: str, request: ImportRequest) -> None:
+    _update_import_job(
+        job_id,
+        status="running",
+        started_at=datetime.now(),
+        message="导入任务正在运行。",
+    )
+    try:
+        source_path, files = _prepare_import(request)
+        _update_import_job(
+            job_id,
+            source_path=str(source_path),
+            files_seen=len(files),
+            message=f"正在导入 {len(files)} 个日线文件，并同步已下载的分钟线。",
+        )
+        result = _run_import(request, lambda changes: _update_import_job(job_id, **changes))
+    except HTTPException as exc:
+        _update_import_job(
+            job_id,
+            status="failed",
+            errors=[str(exc.detail)],
+            message=str(exc.detail),
+            finished_at=datetime.now(),
+        )
+        return
+    except Exception as exc:  # noqa: BLE001
+        _update_import_job(
+            job_id,
+            status="failed",
+            errors=[str(exc)],
+            message="导入任务失败。",
+            finished_at=datetime.now(),
+        )
+        return
+
+    _update_import_job(
+        job_id,
+        status="succeeded",
+        source_path=result.source_path,
+        files_seen=result.files_seen,
+        files_imported=result.files_imported,
+        bars_imported=result.bars_imported,
+        minute_bars_imported=result.minute_bars_imported,
+        symbols_imported=result.symbols_imported,
+        errors=result.errors,
+        message="导入任务已完成。",
+        finished_at=datetime.now(),
+    )
+
+
+def _save_import_job(job: ImportJob) -> None:
+    with _IMPORT_JOBS_LOCK:
+        _IMPORT_JOBS[job.id] = job
+
+
+def _get_import_job(job_id: str) -> ImportJob | None:
+    with _IMPORT_JOBS_LOCK:
+        return _IMPORT_JOBS.get(job_id)
+
+
+def _update_import_job(job_id: str, **changes) -> None:
+    with _IMPORT_JOBS_LOCK:
+        job = _IMPORT_JOBS.get(job_id)
+        if job is None:
+            return
+        _IMPORT_JOBS[job_id] = job.model_copy(update=changes)
 
 
 def _resolve_source_path(request_path: str | None) -> Path:

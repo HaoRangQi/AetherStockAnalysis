@@ -19,8 +19,10 @@ import {
   AnnotationRecord,
   BarRecord,
   DataHealth,
+  DataRecommendation,
   ChanAnalysis,
   DataSourceCandidate,
+  ImportJob,
   ImportResult,
   RuleProfile,
   SymbolRecord,
@@ -31,15 +33,27 @@ import {
   getChartData,
   getCurrentSource,
   getDataHealth,
+  getImportJob,
   getRuleProfiles,
-  importDaily,
   saveSource,
   searchSymbols,
+  startImportJob,
 } from "./api";
 import { KLineChart } from "./KLineChart";
 
 type Panel = "workbench" | "data" | "layers" | "settings";
 type Theme = "light" | "dark";
+type MinuteDataState = "ready" | "downloaded" | "missing";
+
+type MinuteDataStatus = {
+  timeframe: string;
+  sourceFiles: number;
+  dbBars: number;
+  dbAvailable: boolean;
+  state: MinuteDataState;
+  detail: string;
+  action: string;
+};
 
 const timeframes = [
   { value: "1m", label: "1 分钟" },
@@ -88,6 +102,7 @@ export function App() {
   const [ruleProfiles, setRuleProfiles] = useState<RuleProfile[]>([]);
   const [annotationDraft, setAnnotationDraft] = useState("");
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
+  const [importJob, setImportJob] = useState<ImportJob | null>(null);
   const [status, setStatus] = useState("正在检测数据源");
   const [chartStatus, setChartStatus] = useState("等待选择标的");
   const [busy, setBusy] = useState(false);
@@ -179,7 +194,7 @@ export function App() {
             result.bars.length > 0
               ? `已加载 ${result.bars.length.toLocaleString()} 根 K 线`
               : minuteFrames.has(timeframe)
-                ? "当前级别暂无本地分钟线数据"
+                ? chartEmptyStatus(timeframe, source, dataHealth)
                 : "当前范围暂无 K 线数据",
           );
         }
@@ -200,7 +215,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedSymbol, timeframe, dateStart, dateEnd]);
+  }, [selectedSymbol, timeframe, dateStart, dateEnd, source, dataHealth]);
 
   const loadMoreHistory = useCallback(async () => {
     const oldestLoaded = bars[0]?.trade_date;
@@ -284,6 +299,19 @@ export function App() {
     [bars.length, dataHealth, dateEnd, dateStart, loadedWindowEnd, loadedWindowStart, selectedSymbol],
   );
 
+  const minuteStatuses = useMemo(() => buildMinuteStatuses(source, dataHealth), [source, dataHealth]);
+  const displayRecommendations = useMemo(
+    () => mergeDataRecommendations(dataHealth?.recommendations ?? [], minuteStatuses),
+    [dataHealth, minuteStatuses],
+  );
+  const selectedMinuteStatus = minuteFrameSelected ? statusForTimeframe(timeframe, minuteStatuses) : null;
+  const minuteEmptyMessage =
+    selectedMinuteStatus?.state === "downloaded"
+      ? `${selectedMinuteStatus.timeframe} 数据源已发现 ${selectedMinuteStatus.sourceFiles.toLocaleString()} 个文件，但尚未导入数据库；请点击“重新导入行情”。`
+      : selectedMinuteStatus?.state === "missing"
+        ? selectedMinuteStatus.detail
+        : "当前数据源尚未导入这个分钟级别的数据；请先在通达信下载分钟线后重新导入行情数据。";
+
   async function refreshSources() {
     setBusy(true);
     setError(null);
@@ -320,12 +348,28 @@ export function App() {
   async function handleImport() {
     setBusy(true);
     setError(null);
-    setStatus("正在导入行情数据");
+    setImportResult(null);
+    setImportJob(null);
+    setStatus("正在启动导入任务");
     try {
-      const result = await importDaily(manualPath);
+      let job = await startImportJob(manualPath);
+      setImportJob(job);
+      setStatus(importJobStatusText(job));
+      while (job.status === "queued" || job.status === "running") {
+        await sleep(1000);
+        job = await getImportJob(job.id);
+        setImportJob(job);
+        setStatus(importJobStatusText(job));
+      }
+      if (job.status === "failed") {
+        throw new Error(job.message || job.errors[0] || "导入任务失败");
+      }
+      const result = importResultFromJob(job);
       setImportResult(result);
       setStatus(`导入完成：${result.symbols_imported.toLocaleString()} 个标的`);
-      setDataHealth(await getDataHealth());
+      const [health, current] = await Promise.all([getDataHealth(), getCurrentSource()]);
+      setDataHealth(health);
+      setSource(current.health);
       const found = await searchSymbols(query);
       setSymbols(found);
       if (found.length > 0) {
@@ -468,6 +512,7 @@ export function App() {
             <Download size={17} />
             导入行情数据
           </button>
+          {importJob && <ImportJobProgress job={importJob} compact />}
         </section>
 
         <section className="surface search-panel">
@@ -529,7 +574,7 @@ export function App() {
             onLoadMoreHistory={loadMoreHistory}
             emptyMessage={
               minuteFrameSelected
-                ? "当前数据源尚未导入这个分钟级别的数据；请先在通达信下载分钟线后重新导入行情数据。"
+                ? minuteEmptyMessage
                 : "先导入通达信行情数据，或选择已导入的证券。"
             }
           />
@@ -609,11 +654,13 @@ export function App() {
             </div>
             <p className="explain-text">
               当前会导入通达信日线和已下载的 1 分钟 / 5 分钟数据；15 / 30 / 60 分钟由 5 分钟数据聚合。
+              通达信下载或更新数据后，需要再次导入，图表才会使用最新文件。
             </p>
             <button className="filled-button full-width" onClick={() => void handleImport()} disabled={busy || !manualPath}>
               <Download size={17} />
               重新导入行情
             </button>
+            {importJob && <ImportJobProgress job={importJob} />}
           </section>
         </>
       );
@@ -927,18 +974,24 @@ export function App() {
               <small>{item.available ? item.derived_from ?? formatCount(item.bars) : "缺失"}</small>
             </span>
           ))}
+          {minuteStatuses.map((item) => (
+            <span key={`source-${item.timeframe}`} className={`coverage-chip ${item.state}`}>
+              源目录 {item.timeframe}
+              <small>{item.sourceFiles.toLocaleString()} 文件</small>
+            </span>
+          ))}
         </div>
 
         <div className="health-section-title">补数建议</div>
         <div className="recommendation-list">
-          {(dataHealth?.recommendations ?? []).map((item) => (
+          {displayRecommendations.map((item) => (
             <div key={`${item.severity}-${item.title}`} className={`recommendation ${item.severity}`}>
               <strong>{item.title}</strong>
               <span>{item.detail}</span>
               <small>{item.action}</small>
             </div>
           ))}
-          {!dataHealth?.recommendations.length && <p className="empty-note">正在等待数据健康检查。</p>}
+          {!displayRecommendations.length && <p className="empty-note">正在等待数据健康检查。</p>}
         </div>
 
         {candidates.length > 0 && (
@@ -965,6 +1018,32 @@ export function App() {
   }
 }
 
+function ImportJobProgress({ job, compact = false }: { job: ImportJob; compact?: boolean }) {
+  const statusLabel = importJobStatusLabel(job.status);
+  const fileProgress =
+    job.files_seen > 0
+      ? `${job.files_imported.toLocaleString()} / ${job.files_seen.toLocaleString()} 日线文件`
+      : "正在准备文件列表";
+  const minuteFileProgress =
+    job.minute_files_seen > 0
+      ? `${job.minute_files_imported.toLocaleString()} / ${job.minute_files_seen.toLocaleString()} 分钟文件`
+      : "分钟文件待扫描";
+  return (
+    <div className={compact ? "import-progress compact" : "import-progress"}>
+      <div>
+        <span className={`job-dot ${job.status}`} />
+        <strong>{statusLabel}</strong>
+      </div>
+      <span>{job.message || fileProgress}</span>
+      <small>
+        {fileProgress} · {minuteFileProgress} · {job.bars_imported.toLocaleString()} 根日线 ·{" "}
+        {job.minute_bars_imported.toLocaleString()} 根分钟线
+      </small>
+      {job.errors.length > 0 && <small>{job.errors[0]}</small>}
+    </div>
+  );
+}
+
 function displayName(symbol: SymbolRecord): string {
   const fallback = symbol.symbol.toUpperCase();
   return symbol.name && symbol.name !== fallback ? symbol.name : fallback;
@@ -984,6 +1063,46 @@ function formatError(error: unknown): string {
     return error.message;
   }
   return "未知错误";
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function importJobStatusLabel(status: ImportJob["status"]): string {
+  const labels: Record<ImportJob["status"], string> = {
+    queued: "等待导入",
+    running: "正在导入",
+    succeeded: "导入完成",
+    failed: "导入失败",
+  };
+  return labels[status];
+}
+
+function importJobStatusText(job: ImportJob): string {
+  if (job.status === "queued") {
+    return "导入任务已排队";
+  }
+  if (job.status === "running") {
+    const filePart = job.files_seen > 0 ? `${job.files_imported}/${job.files_seen} 文件` : "正在扫描文件";
+    return `正在导入行情：${filePart}，${job.minute_bars_imported.toLocaleString()} 根分钟线`;
+  }
+  if (job.status === "succeeded") {
+    return `导入完成：${job.symbols_imported.toLocaleString()} 个标的`;
+  }
+  return job.message || "导入任务失败";
+}
+
+function importResultFromJob(job: ImportJob): ImportResult {
+  return {
+    source_path: job.source_path ?? "",
+    files_seen: job.files_seen,
+    files_imported: job.files_imported,
+    bars_imported: job.bars_imported,
+    minute_bars_imported: job.minute_bars_imported,
+    symbols_imported: job.symbols_imported,
+    errors: job.errors,
+  };
 }
 
 function formatDateTime(value: string): string {
@@ -1023,6 +1142,100 @@ function formatDateRange(start: string | null | undefined, end: string | null | 
     return "-";
   }
   return `${start ?? "-"} 至 ${end ?? "-"}`;
+}
+
+function buildMinuteStatuses(source: DataSourceCandidate | null, dataHealth: DataHealth | null): MinuteDataStatus[] {
+  return [
+    buildMinuteStatus("1 分钟", source?.minute1_files ?? 0, dataHealth?.timeframes.find((item) => item.timeframe === "1M")),
+    buildMinuteStatus("5 分钟", source?.minute5_files ?? 0, dataHealth?.timeframes.find((item) => item.timeframe === "5M")),
+  ];
+}
+
+function buildMinuteStatus(
+  timeframe: string,
+  sourceFiles: number,
+  coverage: DataHealth["timeframes"][number] | undefined,
+): MinuteDataStatus {
+  const dbBars = coverage?.bars ?? 0;
+  const dbAvailable = Boolean(coverage?.available);
+  if (dbAvailable) {
+    return {
+      timeframe,
+      sourceFiles,
+      dbBars,
+      dbAvailable,
+      state: "ready",
+      detail: `${timeframe}数据库已导入 ${dbBars.toLocaleString()} 根 K 线。`,
+      action: "可以直接切换到对应分钟周期查看。",
+    };
+  }
+  if (sourceFiles > 0) {
+    return {
+      timeframe,
+      sourceFiles,
+      dbBars,
+      dbAvailable,
+      state: "downloaded",
+      detail: `源目录已发现 ${sourceFiles.toLocaleString()} 个 ${timeframe}文件，但数据库还没有对应 K 线。`,
+      action: "点击“重新导入行情”，把刚下载的分钟文件导入数据库。",
+    };
+  }
+  return {
+    timeframe,
+    sourceFiles,
+    dbBars,
+    dbAvailable,
+    state: "missing",
+    detail: `源目录没有发现 ${timeframe}文件。`,
+    action: `先在通达信盘后数据下载里勾选 ${timeframe}线，再重新导入行情。`,
+  };
+}
+
+function mergeDataRecommendations(recommendations: DataRecommendation[], minuteStatuses: MinuteDataStatus[]): DataRecommendation[] {
+  const minuteTitles = new Set(["缺少 1 分钟数据", "缺少 5 分钟数据"]);
+  const result = recommendations.filter((item) => !minuteTitles.has(item.title));
+  for (const status of minuteStatuses) {
+    if (status.state === "downloaded") {
+      result.push({
+        severity: "warn",
+        title: `${status.timeframe}已下载未导入`,
+        detail: status.detail,
+        action: status.action,
+      });
+    } else if (status.state === "missing") {
+      result.push({
+        severity: status.timeframe === "5 分钟" ? "warn" : "info",
+        title: `缺少 ${status.timeframe}数据`,
+        detail: status.detail,
+        action: status.action,
+      });
+    }
+  }
+  return result;
+}
+
+function statusForTimeframe(timeframe: string, statuses: MinuteDataStatus[]): MinuteDataStatus | null {
+  if (timeframe === "1m") {
+    return statuses.find((item) => item.timeframe === "1 分钟") ?? null;
+  }
+  if (["5m", "15m", "30m", "60m"].includes(timeframe)) {
+    return statuses.find((item) => item.timeframe === "5 分钟") ?? null;
+  }
+  return null;
+}
+
+function chartEmptyStatus(timeframe: string, source: DataSourceCandidate | null, dataHealth: DataHealth | null): string {
+  const status = statusForTimeframe(timeframe, buildMinuteStatuses(source, dataHealth));
+  if (!status) {
+    return "当前级别暂无本地分钟线数据";
+  }
+  if (status.state === "downloaded") {
+    return `${status.timeframe}源目录已有文件，尚未导入数据库`;
+  }
+  if (status.state === "missing") {
+    return `${status.timeframe}源目录未发现文件`;
+  }
+  return `当前范围暂无 ${status.timeframe}K 线`;
 }
 
 function mergeBars(...chunks: BarRecord[][]): BarRecord[] {

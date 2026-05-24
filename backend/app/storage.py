@@ -5,6 +5,7 @@ import json
 import tempfile
 import threading
 import uuid
+from collections.abc import Callable
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -908,19 +909,37 @@ def import_daily_files(
     files: list[Path],
     markets: list[str] | None = None,
     limit_files: int | None = None,
+    progress: Callable[[dict], None] | None = None,
 ) -> tuple[int, int, int, list[str]]:
     errors: list[str] = []
     bars_imported = 0
     minute_bars_imported = 0
     files_imported = 0
+    minute_files_seen = 0
+    minute_files_imported = 0
     csv_path: str | None = None
     minute_csv_path: str | None = None
+
+    def emit_progress(message: str) -> None:
+        if progress:
+            progress(
+                {
+                    "files_imported": files_imported,
+                    "bars_imported": bars_imported,
+                    "minute_files_seen": minute_files_seen,
+                    "minute_files_imported": minute_files_imported,
+                    "minute_bars_imported": minute_bars_imported,
+                    "errors": errors[:50],
+                    "message": message,
+                }
+            )
 
     try:
         with tempfile.NamedTemporaryFile("w", newline="", suffix=".csv", delete=False) as csv_file:
             csv_path = csv_file.name
             writer = csv.writer(csv_file)
             writer.writerow(["symbol", "market", "code", "trade_date", "open", "high", "low", "close", "amount", "volume"])
+            emit_progress("正在解析日线文件。")
             for file_path in files:
                 try:
                     from .tdx import parse_daily_file
@@ -945,15 +964,19 @@ def import_daily_files(
                         )
                     bars_imported += len(bars)
                     files_imported += 1
+                    emit_progress("正在解析日线文件。")
                 except Exception as exc:  # noqa: BLE001
                     rel = file_path.relative_to(source_path) if file_path.is_relative_to(source_path) else file_path
                     errors.append(f"{rel}: {exc}")
+                    emit_progress("解析日线文件时遇到错误。")
 
         from .tdx import iter_minute_files, parse_minute_file
 
         minute_files = iter_minute_files(source_path, markets or ["sh", "sz", "bj"])
         if limit_files is not None:
             minute_files = minute_files[:limit_files]
+        minute_files_seen = len(minute_files)
+        emit_progress("正在解析分钟线文件。")
         with tempfile.NamedTemporaryFile("w", newline="", suffix=".csv", delete=False) as minute_csv_file:
             minute_csv_path = minute_csv_file.name
             writer = csv.writer(minute_csv_file)
@@ -982,14 +1005,18 @@ def import_daily_files(
                             ]
                         )
                     minute_bars_imported += len(bars)
+                    minute_files_imported += 1
+                    emit_progress("正在解析分钟线文件。")
                 except Exception as exc:  # noqa: BLE001
                     rel = file_path.relative_to(source_path) if file_path.is_relative_to(source_path) else file_path
                     errors.append(f"{rel}: {exc}")
+                    emit_progress("解析分钟线文件时遇到错误。")
 
         if bars_imported == 0 and minute_bars_imported == 0:
             return files_imported, bars_imported, minute_bars_imported, errors
 
         with connect() as conn:
+            emit_progress("正在写入本地数据库。")
             conn.execute("BEGIN TRANSACTION")
             try:
                 if bars_imported > 0:
@@ -1098,6 +1125,7 @@ def import_daily_files(
 
                 apply_symbol_names(conn, load_symbol_name_map(source_path))
                 conn.execute("COMMIT")
+                emit_progress("数据库写入完成。")
             except Exception:
                 conn.execute("ROLLBACK")
                 raise

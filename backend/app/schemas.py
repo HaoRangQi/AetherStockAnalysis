@@ -49,6 +49,23 @@ class ImportResult(BaseModel):
     errors: list[str] = Field(default_factory=list)
 
 
+class ImportJob(BaseModel):
+    id: str
+    status: str
+    source_path: str | None = None
+    files_seen: int = 0
+    files_imported: int = 0
+    bars_imported: int = 0
+    minute_files_seen: int = 0
+    minute_files_imported: int = 0
+    minute_bars_imported: int = 0
+    symbols_imported: int = 0
+    errors: list[str] = Field(default_factory=list)
+    message: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
 class MarketCoverage(BaseModel):
     market: str
     symbols: int = 0

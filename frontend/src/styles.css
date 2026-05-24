@@ -620,11 +620,13 @@ button:disabled {
 }
 
 .coverage-chip.ok,
+.coverage-chip.ready,
 .recommendation.ok {
   background: var(--md-sys-color-status-ok);
 }
 
 .coverage-chip.warn,
+.coverage-chip.downloaded,
 .recommendation.warn,
 .recommendation.danger {
   background: var(--md-sys-color-status-warn);
@@ -660,6 +662,58 @@ button:disabled {
 
 .candidate small {
   color: var(--md-sys-color-on-surface-variant);
+}
+
+.import-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: var(--md-sys-shape-corner-small);
+  background: var(--md-sys-color-surface-container);
+}
+
+.import-progress.compact {
+  padding: 8px 10px;
+}
+
+.import-progress div {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.import-progress span,
+.import-progress small {
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.import-progress strong {
+  font-size: 13px;
+}
+
+.job-dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--md-sys-color-outline);
+}
+
+.job-dot.running,
+.job-dot.queued {
+  background: var(--md-sys-color-primary);
+}
+
+.job-dot.succeeded {
+  background: var(--md-sys-color-success);
+}
+
+.job-dot.failed {
+  background: var(--md-sys-color-error);
 }
 
 .annotation-input {

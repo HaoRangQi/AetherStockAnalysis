@@ -27,6 +27,25 @@ export type ImportResult = {
   errors: string[];
 };
 
+export type ImportJobStatus = "queued" | "running" | "succeeded" | "failed";
+
+export type ImportJob = {
+  id: string;
+  status: ImportJobStatus;
+  source_path: string | null;
+  files_seen: number;
+  files_imported: number;
+  bars_imported: number;
+  minute_files_seen: number;
+  minute_files_imported: number;
+  minute_bars_imported: number;
+  symbols_imported: number;
+  errors: string[];
+  message: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
 export type MarketCoverage = {
   market: string;
   symbols: number;
@@ -171,6 +190,17 @@ export async function importDaily(path?: string): Promise<ImportResult> {
     method: "POST",
     body: JSON.stringify({ path: path || null }),
   });
+}
+
+export async function startImportJob(path?: string): Promise<ImportJob> {
+  return request("/imports/jobs", {
+    method: "POST",
+    body: JSON.stringify({ path: path || null }),
+  });
+}
+
+export async function getImportJob(jobId: string): Promise<ImportJob> {
+  return request(`/imports/jobs/${encodeURIComponent(jobId)}`);
 }
 
 export async function searchSymbols(query: string): Promise<SymbolRecord[]> {
