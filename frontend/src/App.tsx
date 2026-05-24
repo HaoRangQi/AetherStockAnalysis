@@ -81,7 +81,7 @@ export function App() {
   const [dataHealth, setDataHealth] = useState<DataHealth | null>(null);
   const [manualPath, setManualPath] = useState("");
   const [symbols, setSymbols] = useState<SymbolRecord[]>([]);
-  const [query, setQuery] = useState("000001");
+  const [query, setQuery] = useState("");
   const [selectedSymbol, setSelectedSymbol] = useState<SymbolRecord | null>(null);
   const [defaultTimeframe, setDefaultTimeframe] = useState(() => localStorage.getItem("defaultTimeframe") || "D");
   const [defaultRangeMonths, setDefaultRangeMonths] = useState(() => readDefaultRangeMonths());
@@ -154,18 +154,19 @@ export function App() {
 
   useEffect(() => {
     const timeout = window.setTimeout(async () => {
+      if (!query.trim()) {
+        setSymbols([]);
+        return;
+      }
       try {
         const result = await searchSymbols(query);
         setSymbols(result);
-        if (!selectedSymbol && result.length > 0) {
-          selectSymbol(result[0]);
-        }
       } catch {
         setSymbols([]);
       }
     }, 250);
     return () => window.clearTimeout(timeout);
-  }, [query, selectedSymbol, selectSymbol]);
+  }, [query]);
 
   useEffect(() => {
     if (!selectedSymbol) {
@@ -370,10 +371,8 @@ export function App() {
       const [health, current] = await Promise.all([getDataHealth(), getCurrentSource()]);
       setDataHealth(health);
       setSource(current.health);
-      const found = await searchSymbols(query);
-      setSymbols(found);
-      if (found.length > 0) {
-        selectSymbol(found[0]);
+      if (query.trim()) {
+        setSymbols(await searchSymbols(query));
       }
     } catch (err) {
       setError(formatError(err));
@@ -522,7 +521,7 @@ export function App() {
           </div>
           <div className="search-box">
             <Search size={17} />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="代码 / 名称" />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="输入代码 / 名称搜索" />
           </div>
           <div className="symbol-list">
             {symbols.map((item) => (
@@ -540,7 +539,9 @@ export function App() {
                 <span>{item.last_date ?? "-"}</span>
               </button>
             ))}
-            {symbols.length === 0 && <p className="empty-note">没有匹配的证券。导入后可按名称或代码搜索。</p>}
+            {symbols.length === 0 && (
+              <p className="empty-note">{query.trim() ? "没有匹配的证券。" : "输入代码或名称后选择标的。"}</p>
+            )}
           </div>
         </section>
       </section>
@@ -1269,7 +1270,10 @@ function readDefaultRangeMonths(): number {
 }
 
 function toDateInputValue(value: Date): string {
-  return value.toISOString().slice(0, 10);
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function shiftMonth(value: string, months: number): string {
