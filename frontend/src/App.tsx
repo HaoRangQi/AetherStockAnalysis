@@ -18,6 +18,7 @@ import {
 import {
   AnnotationRecord,
   BarRecord,
+  DataHealth,
   ChanAnalysis,
   DataSourceCandidate,
   ImportResult,
@@ -29,6 +30,7 @@ import {
   detectSources,
   getChartData,
   getCurrentSource,
+  getDataHealth,
   getRuleProfiles,
   importDaily,
   saveSource,
@@ -62,6 +64,7 @@ const navItems = [
 export function App() {
   const [source, setSource] = useState<DataSourceCandidate | null>(null);
   const [candidates, setCandidates] = useState<DataSourceCandidate[]>([]);
+  const [dataHealth, setDataHealth] = useState<DataHealth | null>(null);
   const [manualPath, setManualPath] = useState("");
   const [symbols, setSymbols] = useState<SymbolRecord[]>([]);
   const [query, setQuery] = useState("000001");
@@ -255,7 +258,7 @@ export function App() {
     void loadRuleProfiles();
   }, []);
 
-  const healthItems = useMemo(() => {
+  const sourceHealthItems = useMemo(() => {
     if (!source) {
       return [];
     }
@@ -267,13 +270,28 @@ export function App() {
     ];
   }, [source]);
 
+  const dataSummaryItems = useMemo(
+    () => [
+      ["库内最新 T 日", dataHealth?.latest_trade_date ?? "-"],
+      ["滞后自然日", dataHealth?.days_since_latest == null ? "-" : `${dataHealth.days_since_latest} 天`],
+      ["日线标的", formatCount(dataHealth?.daily_symbols)],
+      ["日线 K 线", formatCount(dataHealth?.daily_bars)],
+      ["全库跨度", formatDateRange(dataHealth?.first_trade_date, dataHealth?.latest_trade_date)],
+      ["当前标的", selectedSymbol ? formatDateRange(selectedSymbol.first_date, selectedSymbol.last_date) : "-"],
+      ["图表窗口", formatDateRange(loadedWindowStart ?? dateStart, loadedWindowEnd ?? dateEnd)],
+      ["图表 K 线", bars.length.toLocaleString()],
+    ],
+    [bars.length, dataHealth, dateEnd, dateStart, loadedWindowEnd, loadedWindowStart, selectedSymbol],
+  );
+
   async function refreshSources() {
     setBusy(true);
     setError(null);
     try {
-      const [current, detected] = await Promise.all([getCurrentSource(), detectSources()]);
+      const [current, detected, health] = await Promise.all([getCurrentSource(), detectSources(), getDataHealth()]);
       setCandidates(detected);
       setSource(current.health);
+      setDataHealth(health);
       setManualPath(current.path ?? detected.find((item) => item.valid)?.path ?? "");
       setStatus(current.valid ? "已连接通达信数据源" : "未配置数据源");
     } catch (err) {
@@ -307,6 +325,7 @@ export function App() {
       const result = await importDaily(manualPath);
       setImportResult(result);
       setStatus(`导入完成：${result.symbols_imported.toLocaleString()} 个标的`);
+      setDataHealth(await getDataHealth());
       const found = await searchSymbols(query);
       setSymbols(found);
       if (found.length > 0) {
@@ -862,14 +881,66 @@ export function App() {
           <Database size={18} />
           <span>数据健康</span>
         </div>
-        <div className="health-list">
-          {healthItems.map(([label, value]) => (
+
+        <div className="health-metric-grid">
+          {dataSummaryItems.map(([label, value]) => (
             <div key={label}>
               <span>{label}</span>
               <strong>{value}</strong>
             </div>
           ))}
         </div>
+
+        <div className="health-section-title">数据源文件</div>
+        <div className="health-list">
+          {sourceHealthItems.map(([label, value]) => (
+            <div key={label}>
+              <span>{label}</span>
+              <strong>{value}</strong>
+            </div>
+          ))}
+          <div>
+            <span>最近文件变更</span>
+            <strong>{source?.latest_modified ? formatDateTime(source.latest_modified) : "-"}</strong>
+          </div>
+        </div>
+
+        <div className="health-section-title">市场覆盖</div>
+        <div className="coverage-list">
+          {(dataHealth?.markets ?? []).map((market) => (
+            <div key={market.market} className="coverage-row">
+              <span>{marketLabel(market.market)}</span>
+              <strong>{market.last_date ?? "-"}</strong>
+              <small>
+                {market.symbols.toLocaleString()} 标的 · {market.latest_symbols.toLocaleString()} 到最新日
+              </small>
+            </div>
+          ))}
+          {!dataHealth?.markets.length && <p className="empty-note">库内还没有市场覆盖数据。</p>}
+        </div>
+
+        <div className="health-section-title">周期覆盖</div>
+        <div className="timeframe-coverage">
+          {(dataHealth?.timeframes ?? []).map((item) => (
+            <span key={item.timeframe} className={item.available ? "coverage-chip ok" : "coverage-chip warn"}>
+              {item.label}
+              <small>{item.available ? item.derived_from ?? formatCount(item.bars) : "缺失"}</small>
+            </span>
+          ))}
+        </div>
+
+        <div className="health-section-title">补数建议</div>
+        <div className="recommendation-list">
+          {(dataHealth?.recommendations ?? []).map((item) => (
+            <div key={`${item.severity}-${item.title}`} className={`recommendation ${item.severity}`}>
+              <strong>{item.title}</strong>
+              <span>{item.detail}</span>
+              <small>{item.action}</small>
+            </div>
+          ))}
+          {!dataHealth?.recommendations.length && <p className="empty-note">正在等待数据健康检查。</p>}
+        </div>
+
         {candidates.length > 0 && (
           <div className="candidate-list">
             {candidates.map((candidate) => (
@@ -932,6 +1003,26 @@ function analysisTypeLabel(value: string): string {
     wave: "波浪",
   };
   return labels[value] ?? value;
+}
+
+function marketLabel(value: string): string {
+  const labels: Record<string, string> = {
+    sh: "沪市",
+    sz: "深市",
+    bj: "北交所",
+  };
+  return labels[value] ?? value.toUpperCase();
+}
+
+function formatCount(value: number | null | undefined): string {
+  return value == null ? "-" : value.toLocaleString();
+}
+
+function formatDateRange(start: string | null | undefined, end: string | null | undefined): string {
+  if (!start && !end) {
+    return "-";
+  }
+  return `${start ?? "-"} 至 ${end ?? "-"}`;
 }
 
 function mergeBars(...chunks: BarRecord[][]): BarRecord[] {

@@ -27,6 +27,45 @@ export type ImportResult = {
   errors: string[];
 };
 
+export type MarketCoverage = {
+  market: string;
+  symbols: number;
+  bars: number;
+  first_date: string | null;
+  last_date: string | null;
+  latest_symbols: number;
+};
+
+export type TimeframeCoverage = {
+  timeframe: string;
+  label: string;
+  bars: number;
+  symbols: number;
+  first_time: string | null;
+  last_time: string | null;
+  available: boolean;
+  derived_from: string | null;
+};
+
+export type DataRecommendation = {
+  severity: "ok" | "info" | "warn" | "danger" | string;
+  title: string;
+  detail: string;
+  action: string;
+};
+
+export type DataHealth = {
+  generated_at: string;
+  latest_trade_date: string | null;
+  days_since_latest: number | null;
+  daily_symbols: number;
+  daily_bars: number;
+  first_trade_date: string | null;
+  markets: MarketCoverage[];
+  timeframes: TimeframeCoverage[];
+  recommendations: DataRecommendation[];
+};
+
 export type SymbolRecord = {
   symbol: string;
   market: string;
@@ -114,6 +153,10 @@ export async function getCurrentSource(): Promise<SourceResponse> {
 
 export async function detectSources(): Promise<DataSourceCandidate[]> {
   return request("/sources/detect");
+}
+
+export async function getDataHealth(): Promise<DataHealth> {
+  return request("/data/health");
 }
 
 export async function saveSource(path: string): Promise<SourceResponse> {

@@ -13,6 +13,7 @@ from .schemas import (
     AnnotationUpdate,
     ChartDataResponse,
     ChanAnalysisResponse,
+    DataHealthResponse,
     DataSourceCandidate,
     ImportRequest,
     ImportResult,
@@ -29,6 +30,7 @@ from .storage import (
     create_rule_profile,
     delete_annotation,
     get_bars,
+    get_data_health,
     import_daily_files,
     list_annotations,
     list_rule_profiles,
@@ -69,6 +71,12 @@ def api_current_source() -> SourceResponse:
         return SourceResponse(path=None, valid=False)
     health = inspect_source(Path(path), "当前数据源")
     return SourceResponse(path=path, valid=health.valid, health=health)
+
+
+@app.get("/api/data/health", response_model=DataHealthResponse)
+def api_data_health() -> DataHealthResponse:
+    with connect() as conn:
+        return get_data_health(conn)
 
 
 @app.post("/api/sources", response_model=SourceResponse)

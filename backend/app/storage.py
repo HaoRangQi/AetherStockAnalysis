@@ -11,7 +11,19 @@ from pathlib import Path
 import duckdb
 
 from . import config
-from .schemas import AnnotationCreate, AnnotationRecord, AnnotationUpdate, BarRecord, RuleProfile, RuleProfileCreate, SymbolRecord
+from .schemas import (
+    AnnotationCreate,
+    AnnotationRecord,
+    AnnotationUpdate,
+    BarRecord,
+    DataHealthResponse,
+    DataRecommendation,
+    MarketCoverage,
+    RuleProfile,
+    RuleProfileCreate,
+    SymbolRecord,
+    TimeframeCoverage,
+)
 
 
 _init_lock = threading.Lock()
@@ -371,6 +383,192 @@ def search_symbols(conn: duckdb.DuckDBPyConnection, query: str = "", limit: int 
         [pattern, pattern, pattern, query, query, limit],
     ).fetchall()
     return [SymbolRecord(**_symbol_row(row)) for row in rows]
+
+
+def get_data_health(conn: duckdb.DuckDBPyConnection) -> DataHealthResponse:
+    latest_trade_date = conn.execute("SELECT max(trade_date) FROM bars_daily").fetchone()[0]
+    first_trade_date = conn.execute("SELECT min(trade_date) FROM bars_daily").fetchone()[0]
+    daily_bars = conn.execute("SELECT count(*) FROM bars_daily").fetchone()[0]
+    daily_symbols = conn.execute("SELECT count(*) FROM symbols").fetchone()[0]
+    market_rows = conn.execute(
+        """
+        SELECT
+            market,
+            count(DISTINCT symbol) AS symbols,
+            count(*) AS bars,
+            min(trade_date) AS first_date,
+            max(trade_date) AS last_date,
+            count(DISTINCT CASE WHEN trade_date = ? THEN symbol END) AS latest_symbols
+        FROM bars_daily
+        GROUP BY market
+        ORDER BY market
+        """,
+        [latest_trade_date],
+    ).fetchall()
+    markets = [
+        MarketCoverage(
+            market=row[0],
+            symbols=row[1] or 0,
+            bars=row[2] or 0,
+            first_date=row[3],
+            last_date=row[4],
+            latest_symbols=row[5] or 0,
+        )
+        for row in market_rows
+    ]
+    timeframes = _timeframe_coverages(conn)
+    recommendations = _data_health_recommendations(latest_trade_date, daily_symbols, markets, timeframes)
+    days_since_latest = (date.today() - latest_trade_date).days if latest_trade_date else None
+    return DataHealthResponse(
+        generated_at=datetime.now(timezone.utc),
+        latest_trade_date=latest_trade_date,
+        days_since_latest=days_since_latest,
+        daily_symbols=daily_symbols,
+        daily_bars=daily_bars,
+        first_trade_date=first_trade_date,
+        markets=markets,
+        timeframes=timeframes,
+        recommendations=recommendations,
+    )
+
+
+def _timeframe_coverages(conn: duckdb.DuckDBPyConnection) -> list[TimeframeCoverage]:
+    daily = conn.execute(
+        """
+        SELECT count(*) AS bars, count(DISTINCT symbol) AS symbols, min(trade_date) AS first_time, max(trade_date) AS last_time
+        FROM bars_daily
+        """
+    ).fetchone()
+    minute_rows = conn.execute(
+        """
+        SELECT
+            interval_minutes,
+            count(*) AS bars,
+            count(DISTINCT symbol) AS symbols,
+            min(trade_time) AS first_time,
+            max(trade_time) AS last_time
+        FROM bars_minute
+        GROUP BY interval_minutes
+        """
+    ).fetchall()
+    minute_by_interval = {row[0]: row[1:] for row in minute_rows}
+    daily_available = (daily[0] or 0) > 0
+    minute5 = minute_by_interval.get(5)
+    minute5_available = bool(minute5 and minute5[1] > 0)
+    result = [
+        _coverage_from_row("D", "日线", daily, daily_available),
+        _coverage_from_row("W", "周线", daily, daily_available, "日线聚合"),
+        _coverage_from_row("M", "月线", daily, daily_available, "日线聚合"),
+        _coverage_from_row("1M", "1 分钟", minute_by_interval.get(1), bool(minute_by_interval.get(1))),
+        _coverage_from_row("5M", "5 分钟", minute5, minute5_available),
+        _coverage_from_row("15M", "15 分钟", minute5, minute5_available, "5 分钟聚合"),
+        _coverage_from_row("30M", "30 分钟", minute5, minute5_available, "5 分钟聚合"),
+        _coverage_from_row("60M", "60 分钟", minute5, minute5_available, "5 分钟聚合"),
+    ]
+    return result
+
+
+def _coverage_from_row(
+    timeframe: str,
+    label: str,
+    row: tuple | None,
+    available: bool,
+    derived_from: str | None = None,
+) -> TimeframeCoverage:
+    if row is None:
+        return TimeframeCoverage(timeframe=timeframe, label=label, available=False, derived_from=derived_from)
+    return TimeframeCoverage(
+        timeframe=timeframe,
+        label=label,
+        bars=row[0] or 0,
+        symbols=row[1] or 0,
+        first_time=_as_time_value(row[2]),
+        last_time=_as_time_value(row[3]),
+        available=available,
+        derived_from=derived_from,
+    )
+
+
+def _data_health_recommendations(
+    latest_trade_date: date | None,
+    daily_symbols: int,
+    markets: list[MarketCoverage],
+    timeframes: list[TimeframeCoverage],
+) -> list[DataRecommendation]:
+    recommendations: list[DataRecommendation] = []
+    if daily_symbols == 0:
+        recommendations.append(
+            DataRecommendation(
+                severity="danger",
+                title="缺少日线数据",
+                detail="本地库还没有导入任何日线 K 线，无法判断股票覆盖和最近交易日。",
+                action="先在通达信下载日线数据，再执行导入行情数据。",
+            )
+        )
+        return recommendations
+
+    if latest_trade_date and (date.today() - latest_trade_date).days > 4:
+        recommendations.append(
+            DataRecommendation(
+                severity="warn",
+                title="日线数据可能落后",
+                detail=f"本地最新日线停在 {latest_trade_date.isoformat()}，已经超过 4 个自然日没有更新。",
+                action="打开通达信补充最近日线数据后重新导入。",
+            )
+        )
+
+    market_by_name = {item.market: item for item in markets}
+    for market, label in [("sh", "沪市"), ("sz", "深市")]:
+        item = market_by_name.get(market)
+        if not item:
+            recommendations.append(
+                DataRecommendation(
+                    severity="warn",
+                    title=f"缺少{label}日线",
+                    detail=f"本地库没有发现 {market.upper()} 市场日线记录。",
+                    action=f"确认通达信 {market}/lday 目录已下载，再重新导入。",
+                )
+            )
+        elif latest_trade_date and item.last_date and item.last_date < latest_trade_date:
+            recommendations.append(
+                DataRecommendation(
+                    severity="warn",
+                    title=f"{label}日线未同步到最新日",
+                    detail=f"{label}最新为 {item.last_date.isoformat()}，全库最新为 {latest_trade_date.isoformat()}。",
+                    action=f"补充 {market.upper()} 市场日线数据后重新导入。",
+                )
+            )
+
+    timeframe_by_name = {item.timeframe: item for item in timeframes}
+    if not timeframe_by_name.get("1M", TimeframeCoverage(timeframe="1M", label="1 分钟")).available:
+        recommendations.append(
+            DataRecommendation(
+                severity="info",
+                title="缺少 1 分钟数据",
+                detail="1 分钟周期没有可用记录，短线回放和细粒度分析会为空。",
+                action="在通达信下载 1 分钟线后重新导入。",
+            )
+        )
+    if not timeframe_by_name.get("5M", TimeframeCoverage(timeframe="5M", label="5 分钟")).available:
+        recommendations.append(
+            DataRecommendation(
+                severity="warn",
+                title="缺少 5 分钟数据",
+                detail="5 分钟数据为空，15 / 30 / 60 分钟聚合周期也无法生成。",
+                action="在通达信下载 5 分钟线后重新导入。",
+            )
+        )
+
+    if not recommendations:
+        recommendations.append(
+            DataRecommendation(
+                severity="ok",
+                title="暂无明显补数项",
+                detail="日线、市场和分钟基础数据都有可用记录。",
+                action="保持通达信每日更新后定期重新导入。",
+            )
+        )
+    return recommendations
 
 
 def get_bars(

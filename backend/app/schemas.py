@@ -49,6 +49,45 @@ class ImportResult(BaseModel):
     errors: list[str] = Field(default_factory=list)
 
 
+class MarketCoverage(BaseModel):
+    market: str
+    symbols: int = 0
+    bars: int = 0
+    first_date: date | None = None
+    last_date: date | None = None
+    latest_symbols: int = 0
+
+
+class TimeframeCoverage(BaseModel):
+    timeframe: str
+    label: str
+    bars: int = 0
+    symbols: int = 0
+    first_time: str | None = None
+    last_time: str | None = None
+    available: bool = False
+    derived_from: str | None = None
+
+
+class DataRecommendation(BaseModel):
+    severity: str
+    title: str
+    detail: str
+    action: str
+
+
+class DataHealthResponse(BaseModel):
+    generated_at: datetime
+    latest_trade_date: date | None = None
+    days_since_latest: int | None = None
+    daily_symbols: int = 0
+    daily_bars: int = 0
+    first_trade_date: date | None = None
+    markets: list[MarketCoverage] = Field(default_factory=list)
+    timeframes: list[TimeframeCoverage] = Field(default_factory=list)
+    recommendations: list[DataRecommendation] = Field(default_factory=list)
+
+
 class SymbolRecord(BaseModel):
     symbol: str
     market: str

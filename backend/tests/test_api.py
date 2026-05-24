@@ -143,3 +143,35 @@ def test_import_updates_names_and_chart_includes_minute_data(tmp_path: Path, mon
     invalid_before = client.get("/api/chart?symbol=sh600000&timeframe=D&before=not-a-date")
     assert invalid_before.status_code == 400
     assert "before 格式无效" in invalid_before.json()["detail"]
+
+    health = client.get("/api/data/health")
+    assert health.status_code == 200
+    health_payload = health.json()
+    assert health_payload["latest_trade_date"] == "2026-05-22"
+    assert health_payload["daily_symbols"] == 1
+    assert health_payload["daily_bars"] == 6
+    assert health_payload["markets"][0]["market"] == "sh"
+    assert health_payload["markets"][0]["latest_symbols"] == 1
+    coverage = {item["timeframe"]: item for item in health_payload["timeframes"]}
+    assert coverage["D"]["available"] is True
+    assert coverage["5M"]["bars"] == 2
+    assert coverage["15M"]["available"] is True
+    assert coverage["15M"]["derived_from"] == "5 分钟聚合"
+    assert any(item["title"] == "缺少深市日线" for item in health_payload["recommendations"])
+
+
+def test_data_health_empty_database(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(config, "APP_DIR", tmp_path)
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "empty.duckdb")
+
+    client = TestClient(app)
+    response = client.get("/api/data/health")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["latest_trade_date"] is None
+    assert payload["daily_symbols"] == 0
+    assert payload["daily_bars"] == 0
+    assert payload["timeframes"][0]["timeframe"] == "D"
+    assert payload["timeframes"][0]["available"] is False
+    assert payload["recommendations"][0]["title"] == "缺少日线数据"

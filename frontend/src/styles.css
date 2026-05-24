@@ -523,13 +523,15 @@ button:disabled {
   color: var(--md-sys-color-on-surface-variant);
 }
 
-.metric-grid {
+.metric-grid,
+.health-metric-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
 }
 
-.metric-grid div {
+.metric-grid div,
+.health-metric-grid div {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -539,6 +541,7 @@ button:disabled {
 }
 
 .metric-grid span,
+.health-metric-grid span,
 .health-list span {
   color: var(--md-sys-color-on-surface-variant);
   font-size: 12px;
@@ -546,6 +549,18 @@ button:disabled {
 
 .metric-grid strong {
   font-size: 22px;
+}
+
+.health-metric-grid strong {
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.health-section-title {
+  margin-top: 14px;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .health-list {
@@ -558,6 +573,65 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.coverage-list,
+.recommendation-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.coverage-row,
+.recommendation {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px;
+  border-radius: 12px;
+  background: var(--md-sys-color-surface-container);
+}
+
+.coverage-row span,
+.recommendation span,
+.coverage-row small,
+.recommendation small,
+.coverage-chip small {
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.timeframe-coverage {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.coverage-chip {
+  display: inline-flex;
+  flex-direction: column;
+  min-width: 82px;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: var(--md-sys-color-status-warn);
+  color: var(--md-sys-color-on-surface);
+}
+
+.coverage-chip.ok,
+.recommendation.ok {
+  background: var(--md-sys-color-status-ok);
+}
+
+.coverage-chip.warn,
+.recommendation.warn,
+.recommendation.danger {
+  background: var(--md-sys-color-status-warn);
+}
+
+.recommendation.info {
+  background: var(--md-sys-color-surface-container);
 }
 
 .candidate-list {
