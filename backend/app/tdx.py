@@ -96,21 +96,24 @@ def inspect_source(path: Path, label: str = "手动数据源") -> DataSourceCand
             market_dir = expanded / market
             if market_dir.exists():
                 markets.append(market)
-            daily_files += _count_files(market_dir / "lday", "*.day")
-            minute1_files += _count_files(market_dir / "minline", "*")
-            minute5_files += _count_files(market_dir / "fzline", "*")
+            daily_paths = _market_files(market_dir / "lday", f"{market}*.day")
+            minute1_paths = _market_files(market_dir / "minline", f"{market}*.lc1")
+            minute5_paths = _market_files(market_dir / "fzline", f"{market}*.lc5")
+            daily_files += len(daily_paths)
+            minute1_files += len(minute1_paths)
+            minute5_files += len(minute5_paths)
+            size_bytes, latest_modified = _accumulate_file_stats(
+                [*daily_paths, *minute1_paths, *minute5_paths],
+                size_bytes,
+                latest_modified,
+            )
 
-        for file_path in expanded.rglob("*"):
-            if not file_path.is_file():
-                continue
-            try:
-                stat = file_path.stat()
-            except OSError:
-                continue
-            size_bytes += stat.st_size
-            modified = datetime.fromtimestamp(stat.st_mtime)
-            if latest_modified is None or modified > latest_modified:
-                latest_modified = modified
+        tnf_paths = [
+            cache_dir / filename
+            for cache_dir in _candidate_hq_cache_dirs(expanded)
+            for filename in TNF_FILES
+        ]
+        size_bytes, latest_modified = _accumulate_file_stats(tnf_paths, size_bytes, latest_modified)
 
     return DataSourceCandidate(
         path=str(expanded),
@@ -255,10 +258,27 @@ def parse_tnf_symbol_names(file_path: Path, market: str) -> dict[str, str]:
     return names
 
 
-def _count_files(path: Path, pattern: str) -> int:
+def _market_files(path: Path, pattern: str) -> list[Path]:
     if not path.exists():
-        return 0
-    return sum(1 for item in path.glob(pattern) if item.is_file())
+        return []
+    return [item for item in path.glob(pattern) if item.is_file()]
+
+
+def _accumulate_file_stats(
+    paths: list[Path],
+    size_bytes: int,
+    latest_modified: datetime | None,
+) -> tuple[int, datetime | None]:
+    for file_path in paths:
+        try:
+            stat = file_path.stat()
+        except OSError:
+            continue
+        size_bytes += stat.st_size
+        modified = datetime.fromtimestamp(stat.st_mtime)
+        if latest_modified is None or modified > latest_modified:
+            latest_modified = modified
+    return size_bytes, latest_modified
 
 
 def _candidate_hq_cache_dirs(source_path: Path) -> list[Path]:

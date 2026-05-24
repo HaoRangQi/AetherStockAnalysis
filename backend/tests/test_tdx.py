@@ -9,6 +9,7 @@ from app.tdx import (
     DAY_RECORD_SIZE,
     MINUTE_RECORD_SIZE,
     TNF_RECORD_SIZE,
+    inspect_source,
     load_symbol_name_map,
     parse_daily_file,
     parse_minute_file,
@@ -98,3 +99,37 @@ def test_load_symbol_name_map_from_vipdoc_sibling_cache(tmp_path: Path) -> None:
     names = load_symbol_name_map(vipdoc)
 
     assert names["sz000001"] == "平安银行"
+
+
+def test_inspect_source_scans_only_known_market_files(tmp_path: Path) -> None:
+    vipdoc = tmp_path / "new_tdx" / "vipdoc"
+    lday = vipdoc / "sh" / "lday"
+    minline = vipdoc / "sh" / "minline"
+    fzline = vipdoc / "sh" / "fzline"
+    unrelated = vipdoc / "T0002" / "cache"
+    cache = tmp_path / "new_tdx" / "T0002" / "hq_cache"
+    for directory in [lday, minline, fzline, unrelated, cache]:
+        directory.mkdir(parents=True)
+
+    daily = lday / "sh600000.day"
+    minute1 = minline / "sh600000.lc1"
+    minute5 = fzline / "sh600000.lc5"
+    tnf = cache / "shs.tnf"
+    ignored_extension = minline / "sh600001.tmp"
+    ignored_nested = unrelated / "large-cache.bin"
+
+    daily.write_bytes(b"d" * 10)
+    minute1.write_bytes(b"1" * 20)
+    minute5.write_bytes(b"5" * 30)
+    tnf.write_bytes(b"t" * 40)
+    ignored_extension.write_bytes(b"x" * 100)
+    ignored_nested.write_bytes(b"z" * 1000)
+
+    health = inspect_source(vipdoc)
+
+    assert health.valid is True
+    assert health.markets == ["sh"]
+    assert health.daily_files == 1
+    assert health.minute1_files == 1
+    assert health.minute5_files == 1
+    assert health.size_bytes == 100
