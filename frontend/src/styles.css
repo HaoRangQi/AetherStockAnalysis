@@ -275,6 +275,16 @@ button {
   margin-top: 12px;
 }
 
+.range-warning {
+  margin: 10px 0 0;
+  padding: 9px 10px;
+  border-radius: var(--md-sys-shape-corner-small);
+  background: var(--md-sys-color-status-warn);
+  color: var(--md-sys-color-on-surface);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .button-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -452,6 +462,7 @@ button:disabled {
 }
 
 .chart-surface {
+  position: relative;
   min-height: 0;
   overflow: hidden;
   border-radius: var(--md-sys-shape-corner-large);
@@ -483,6 +494,61 @@ button:disabled {
 .empty-chart strong {
   color: var(--md-sys-color-on-surface);
   font-size: 20px;
+}
+
+.chart-action-card,
+.history-hint {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  box-shadow: var(--md-sys-elevation-level1);
+  background: color-mix(in srgb, var(--md-sys-color-surface) 92%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+.chart-action-card {
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-radius: var(--md-sys-shape-corner-large);
+}
+
+.chart-action-card.downloaded {
+  border-color: color-mix(in srgb, var(--md-sys-color-primary) 45%, var(--md-sys-color-outline-variant));
+}
+
+.chart-action-card div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.chart-action-card span,
+.history-hint span {
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.history-hint {
+  top: 14px;
+  left: 14px;
+  max-width: min(520px, calc(100% - 28px));
+  padding: 8px 10px 8px 12px;
+  border-radius: 20px;
+}
+
+.compact-button {
+  min-height: 32px;
+  flex: 0 0 auto;
+  padding: 0 12px;
+  font-size: 12px;
 }
 
 .bottom-sheet {
@@ -869,5 +935,19 @@ button:disabled {
 
   .segmented button {
     min-width: 74px;
+  }
+
+  .chart-action-card,
+  .history-hint {
+    align-items: stretch;
+  }
+
+  .chart-action-card {
+    flex-direction: column;
+  }
+
+  .history-hint {
+    right: 14px;
+    flex-direction: column;
   }
 }

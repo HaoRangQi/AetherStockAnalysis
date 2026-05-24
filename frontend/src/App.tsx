@@ -121,6 +121,11 @@ export function App() {
   const selectedCode = selectedSymbol ? selectedSymbol.symbol.toUpperCase() : "";
   const minuteFrameSelected = minuteFrames.has(timeframe);
   const fitContentToken = `${selectedSymbol?.symbol ?? "none"}:${timeframe}:${dateStart}:${dateEnd}`;
+  const selectedRangeMismatch = Boolean(
+    selectedSymbol && dateRangeTouched && isDateRangeOutsideSymbol(dateStart, dateEnd, selectedSymbol),
+  );
+  const dataStoreSummary = formatDataStoreSummary(dataHealth);
+  const sourceUpdateSummary = source?.latest_modified ? `文件更新：${formatDateTime(source.latest_modified)}` : "未发现源文件更新信息";
 
   const selectSymbol = useCallback(
     (symbol: SymbolRecord) => {
@@ -194,9 +199,11 @@ export function App() {
           setChartStatus(
             result.bars.length > 0
               ? `已加载 ${result.bars.length.toLocaleString()} 根 K 线`
-              : minuteFrames.has(timeframe)
-                ? chartEmptyStatus(timeframe, source, dataHealth)
-                : "当前范围暂无 K 线数据",
+              : selectedRangeMismatch
+                ? "当前日期范围不覆盖该标的"
+                : minuteFrames.has(timeframe)
+                  ? chartEmptyStatus(timeframe, source, dataHealth)
+                  : "当前范围暂无 K 线数据",
           );
         }
       } catch (err) {
@@ -216,7 +223,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedSymbol, timeframe, dateStart, dateEnd, source, dataHealth]);
+  }, [selectedSymbol, timeframe, dateStart, dateEnd, source, dataHealth, selectedRangeMismatch]);
 
   const loadMoreHistory = useCallback(async () => {
     const oldestLoaded = bars[0]?.trade_date;
@@ -306,12 +313,11 @@ export function App() {
     [dataHealth, minuteStatuses],
   );
   const selectedMinuteStatus = minuteFrameSelected ? statusForTimeframe(timeframe, minuteStatuses) : null;
-  const minuteEmptyMessage =
-    selectedMinuteStatus?.state === "downloaded"
-      ? `${selectedMinuteStatus.timeframe} 数据源已发现 ${selectedMinuteStatus.sourceFiles.toLocaleString()} 个文件，但尚未导入数据库；请点击“重新导入行情”。`
-      : selectedMinuteStatus?.state === "missing"
-        ? selectedMinuteStatus.detail
-        : "当前数据源尚未导入这个分钟级别的数据；请先在通达信下载分钟线后重新导入行情数据。";
+  const minuteEmptyMessage = minuteChartEmptyMessage(timeframe, selectedMinuteStatus);
+  const chartAction =
+    minuteFrameSelected && bars.length === 0 && selectedMinuteStatus && !selectedRangeMismatch
+      ? minuteChartAction(timeframe, selectedMinuteStatus)
+      : null;
 
   async function refreshSources() {
     setBusy(true);
@@ -427,6 +433,14 @@ export function App() {
     setDateRangeTouched(false);
   }
 
+  function resetRangeForSelectedSymbol() {
+    if (minuteFrameSelected) {
+      applyIntradayRange();
+      return;
+    }
+    applyDefaultRange();
+  }
+
   function handleTimeframeChange(nextFrame: string) {
     setTimeframe(nextFrame);
     if (dateRangeTouched) {
@@ -437,6 +451,16 @@ export function App() {
       return;
     }
     applyDefaultRange();
+  }
+
+  function handleDateStartChange(value: string) {
+    setDateStart(value);
+    setDateRangeTouched(true);
+  }
+
+  function handleDateEndChange(value: string) {
+    setDateEnd(value);
+    setDateRangeTouched(true);
   }
 
   async function handleDeleteAnnotation(id: string) {
@@ -574,19 +598,55 @@ export function App() {
             isLoadingHistory={isLoadingHistory}
             onLoadMoreHistory={loadMoreHistory}
             emptyMessage={
-              minuteFrameSelected
-                ? minuteEmptyMessage
+              selectedRangeMismatch
+                ? "当前手动日期范围不覆盖该标的；请在右侧时间范围面板重置到标的最新区间。"
+                : minuteFrameSelected
+                  ? minuteEmptyMessage
                 : "先导入通达信行情数据，或选择已导入的证券。"
             }
           />
+          {chartAction && (
+            <div className={`chart-action-card ${selectedMinuteStatus?.state ?? ""}`}>
+              <div>
+                <strong>{chartAction.title}</strong>
+                <span>{chartAction.detail}</span>
+              </div>
+              <button
+                className={chartAction.primary ? "filled-button compact-button" : "tonal-button compact-button"}
+                onClick={chartAction.primary ? () => void handleImport() : () => setActivePanel("data")}
+                disabled={busy || (chartAction.primary && !manualPath)}
+              >
+                {chartAction.primary ? <Download size={15} /> : <Database size={15} />}
+                {chartAction.label}
+              </button>
+            </div>
+          )}
+          {bars.length > 0 && (
+            <div className="history-hint">
+              <span>
+                {isLoadingHistory
+                  ? "正在加载更早 K 线"
+                  : hasMoreHistory
+                    ? "向左拖动 K 线可继续加载历史"
+                    : "已加载到本地最早数据"}
+              </span>
+              {hasMoreHistory && (
+                <button className="tonal-button compact-button" onClick={() => void loadMoreHistory()} disabled={isLoadingHistory}>
+                  {isLoadingHistory ? "加载中" : "加载更早"}
+                </button>
+              )}
+            </div>
+          )}
         </section>
 
         <section className="bottom-sheet">
           <div>
-            <strong>数据状态</strong>
-            <span>
-              {source?.latest_modified ? `最近文件更新：${formatDateTime(source.latest_modified)}` : "未发现更新信息"}
-            </span>
+            <strong>库内数据</strong>
+            <span>{dataStoreSummary}</span>
+          </div>
+          <div>
+            <strong>源文件</strong>
+            <span>{sourceUpdateSummary}</span>
           </div>
           <div>
             <strong>当前周期</strong>
@@ -608,7 +668,7 @@ export function App() {
             </span>
           </div>
           <div>
-            <strong>导入结果</strong>
+            <strong>本次导入</strong>
             <span>
               {importResult
                 ? `${importResult.files_imported}/${importResult.files_seen} 日线文件，${importResult.bars_imported.toLocaleString()} 根日线，${importResult.minute_bars_imported.toLocaleString()} 根分钟线`
@@ -797,10 +857,8 @@ export function App() {
             <input
               type="date"
               value={dateStart}
-              onChange={(event) => {
-                setDateStart(event.target.value);
-                setDateRangeTouched(true);
-              }}
+              onInput={(event) => handleDateStartChange(event.currentTarget.value)}
+              onChange={(event) => handleDateStartChange(event.target.value)}
             />
           </label>
           <label>
@@ -808,10 +866,8 @@ export function App() {
             <input
               type="date"
               value={dateEnd}
-              onChange={(event) => {
-                setDateEnd(event.target.value);
-                setDateRangeTouched(true);
-              }}
+              onInput={(event) => handleDateEndChange(event.currentTarget.value)}
+              onChange={(event) => handleDateEndChange(event.target.value)}
             />
           </label>
         </div>
@@ -819,12 +875,27 @@ export function App() {
           <button className="tonal-button" onClick={() => applyDefaultRange(6)}>
             近 6 个月
           </button>
+          {hasMoreHistory && bars.length > 0 && (
+            <button className="tonal-button" onClick={() => void loadMoreHistory()} disabled={isLoadingHistory}>
+              {isLoadingHistory ? "加载中" : "加载更早"}
+            </button>
+          )}
+          {selectedRangeMismatch && (
+            <button className="tonal-button" onClick={() => resetRangeForSelectedSymbol()}>
+              重置到标的最新区间
+            </button>
+          )}
           {minuteFrameSelected && (
             <button className="tonal-button" onClick={() => applyIntradayRange()}>
               日内近 7 天
             </button>
           )}
         </div>
+        {selectedRangeMismatch && (
+          <p className="range-warning">
+            当前日期范围在 {formatDateRange(selectedSymbol?.first_date, selectedSymbol?.last_date)} 之外。
+          </p>
+        )}
       </section>
     );
   }
@@ -1145,6 +1216,13 @@ function formatDateRange(start: string | null | undefined, end: string | null | 
   return `${start ?? "-"} 至 ${end ?? "-"}`;
 }
 
+function formatDataStoreSummary(dataHealth: DataHealth | null): string {
+  if (!dataHealth || dataHealth.daily_symbols === 0) {
+    return "库内暂无日线数据";
+  }
+  return `${dataHealth.daily_symbols.toLocaleString()} 标的，${formatCount(dataHealth.daily_bars)} 根日线，最新 ${dataHealth.latest_trade_date ?? "-"}`;
+}
+
 function buildMinuteStatuses(source: DataSourceCandidate | null, dataHealth: DataHealth | null): MinuteDataStatus[] {
   return [
     buildMinuteStatus("1 分钟", source?.minute1_files ?? 0, dataHealth?.timeframes.find((item) => item.timeframe === "1M")),
@@ -1225,6 +1303,59 @@ function statusForTimeframe(timeframe: string, statuses: MinuteDataStatus[]): Mi
   return null;
 }
 
+function minuteChartEmptyMessage(timeframe: string, status: MinuteDataStatus | null): string {
+  if (!status) {
+    return "当前级别暂无本地分钟线数据。";
+  }
+  if (status.state === "downloaded") {
+    return `${status.timeframe} 源目录已发现 ${status.sourceFiles.toLocaleString()} 个文件，但数据库还没有对应 K 线。`;
+  }
+  if (status.state === "missing" && ["15m", "30m", "60m"].includes(timeframe)) {
+    return `${timeframeLabel(timeframe)} 周期需要 5 分钟数据聚合生成；当前源目录没有发现 5 分钟文件。`;
+  }
+  if (status.state === "missing") {
+    return status.detail;
+  }
+  return `当前时间范围暂无 ${status.timeframe}K 线；可扩大时间范围或向左加载历史。`;
+}
+
+function minuteChartAction(timeframe: string, status: MinuteDataStatus) {
+  if (status.state === "downloaded") {
+    return {
+      title: `${status.timeframe}已下载，尚未入库`,
+      detail: "点击导入后，图表才能读取这些分钟 K 线。",
+      label: "立即导入",
+      primary: true,
+    };
+  }
+  if (status.state === "missing" && ["15m", "30m", "60m"].includes(timeframe)) {
+    return {
+      title: "缺少 5 分钟源文件",
+      detail: "15 / 30 / 60 分钟会从 5 分钟线聚合；请先在通达信下载 5 分钟线。",
+      label: "查看数据健康",
+      primary: false,
+    };
+  }
+  if (status.state === "missing") {
+    return {
+      title: `${status.timeframe}源文件缺失`,
+      detail: "先在通达信盘后数据下载里补齐该周期，再回到这里重新导入。",
+      label: "查看数据健康",
+      primary: false,
+    };
+  }
+  return {
+    title: `${status.timeframe}库内有数据`,
+    detail: "当前日期范围没有命中分钟 K 线，可调整时间范围。",
+    label: "查看数据健康",
+    primary: false,
+  };
+}
+
+function timeframeLabel(timeframe: string): string {
+  return timeframes.find((item) => item.value === timeframe)?.label ?? timeframe.toUpperCase();
+}
+
 function chartEmptyStatus(timeframe: string, source: DataSourceCandidate | null, dataHealth: DataHealth | null): string {
   const status = statusForTimeframe(timeframe, buildMinuteStatuses(source, dataHealth));
   if (!status) {
@@ -1262,6 +1393,13 @@ function hasOlderHistory(oldestLoaded: string | undefined, firstAvailable: strin
     return false;
   }
   return dateOnly(oldestLoaded) > firstAvailable;
+}
+
+function isDateRangeOutsideSymbol(start: string, end: string, symbol: SymbolRecord): boolean {
+  if (!start || !end || !symbol.first_date || !symbol.last_date) {
+    return false;
+  }
+  return end < symbol.first_date || start > symbol.last_date;
 }
 
 function readDefaultRangeMonths(): number {
