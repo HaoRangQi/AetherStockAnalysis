@@ -675,17 +675,33 @@ def get_minute_bars(
             SELECT
                 *,
                 CASE
-                    WHEN ? = 60 AND CAST(trade_time AS TIME) <= TIME '11:30:00'
-                        THEN CAST(CAST(trade_time AS DATE) AS TIMESTAMP) + INTERVAL '11 hours 30 minutes'
-                    WHEN ? = 60
-                        THEN CAST(CAST(trade_time AS DATE) AS TIMESTAMP) + INTERVAL '15 hours'
-                    ELSE
-                        time_bucket(? * INTERVAL '1 minute', trade_time - INTERVAL '1 second') + ? * INTERVAL '1 minute'
-                END AS bucket_time
+                    WHEN CAST(trade_time AS TIME) > TIME '09:30:00'
+                     AND CAST(trade_time AS TIME) <= TIME '11:30:00'
+                        THEN CAST(CAST(trade_time AS DATE) AS TIMESTAMP) + INTERVAL '9 hours 30 minutes'
+                    WHEN CAST(trade_time AS TIME) > TIME '13:00:00'
+                     AND CAST(trade_time AS TIME) <= TIME '15:00:00'
+                        THEN CAST(CAST(trade_time AS DATE) AS TIMESTAMP) + INTERVAL '13 hours'
+                    ELSE NULL
+                END AS session_start
             FROM bars_minute
             WHERE symbol = ?
               AND interval_minutes = 5
             {date_filters}
+        ),
+        bucketed AS (
+            SELECT
+                *,
+                CASE
+                    WHEN session_start IS NULL THEN NULL
+                    ELSE session_start
+                        + CAST(
+                            CEIL(date_diff('minute', session_start, trade_time)::DOUBLE / ?) * ?
+                            AS BIGINT
+                          ) * INTERVAL '1 minute'
+                END AS bucket_time
+            FROM base
+            WHERE session_start IS NOT NULL
+              AND date_diff('minute', session_start, trade_time) > 0
         ),
         grouped AS (
             SELECT
@@ -696,24 +712,25 @@ def get_minute_bars(
                 min(low) AS low,
                 last(close ORDER BY trade_time ASC) AS close,
                 sum(amount) AS amount,
-                sum(volume) AS volume
-            FROM base
+                sum(volume) AS volume,
+                count(*) AS bar_count
+            FROM bucketed
             GROUP BY symbol, bucket_time
         )
         SELECT symbol, ? AS timeframe, bucket_time, open, high, low, close, amount, volume
         FROM grouped
-        WHERE (? IS NULL OR bucket_time < ?::TIMESTAMP)
+        WHERE bar_count = ?
+          AND (? IS NULL OR bucket_time < ?::TIMESTAMP)
         ORDER BY bucket_time DESC
         LIMIT ?
         """.format(date_filters=grouped_date_filters),
         [
-            interval_minutes,
-            interval_minutes,
-            interval_minutes,
-            interval_minutes,
             symbol.lower(),
             *grouped_date_params,
+            interval_minutes,
+            interval_minutes,
             timeframe,
+            interval_minutes // 5,
             normalized_before,
             normalized_before,
             limit,

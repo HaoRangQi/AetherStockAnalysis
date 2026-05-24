@@ -19,8 +19,8 @@ AetherStockAnalysis 是一个本地化 A 股技术分析工作台，面向缠论
 核心分层：
 
 - 数据源层：探测 CrossOver、Windows、macOS 容器和用户手动指定目录。
-- 导入层：解析通达信 `.day` 文件，批量写入 DuckDB，并生成证券索引。
-- 存储层：行情缓存、证券索引、人工标注、分析规则配置。
+- 导入层：解析通达信 `.day`、`.lc1`、`.lc5` 和证券名称文件，批量写入 DuckDB，并生成证券索引。
+- 存储层：日线/分钟行情缓存、证券索引、人工标注、分析规则配置。
 - 分析层：当前提供缠论分型和波浪 ZigZag 候选；后续扩展笔、线段、中枢和人工改浪。
 - API 层：稳定暴露数据源、导入、行情、分析、标注、规则配置。
 - UI 层：Material You 风格三栏工作台，图表为核心，右侧承载解释和编辑。
@@ -44,6 +44,14 @@ DuckDB 文件位置：`~/.aether_stock_analysis/aether.duckdb`。
 字段：`symbol`、`market`、`code`、`name`、`kind`、`first_date`、`last_date`、`bar_count`。
 
 索引：`symbols_symbol_idx(symbol)`。
+
+### `bars_minute`
+
+分钟行情缓存，导入时按 `symbol + interval_minutes + trade_time` 去重，保留通达信 1 分钟和 5 分钟基础数据。
+
+字段：`symbol`、`market`、`code`、`trade_time`、`interval_minutes`、`open`、`high`、`low`、`close`、`amount`、`volume`。
+
+索引：`bars_minute_symbol_interval_time_idx(symbol, interval_minutes, trade_time)`。
 
 ### `annotations`
 
@@ -69,9 +77,13 @@ DuckDB 文件位置：`~/.aether_stock_analysis/aether.duckdb`。
 - `GET /api/sources/detect`：探测通达信数据源。
 - `GET /api/sources/current`：当前数据源。
 - `POST /api/sources`：保存数据源。
-- `POST /api/imports/daily`：导入日线。
+- `POST /api/imports/daily`：同步导入日线和已下载分钟线。
+- `POST /api/imports/jobs`：启动后台导入任务。
+- `GET /api/imports/jobs/{job_id}`：读取导入任务进度。
 - `GET /api/symbols`：证券搜索。
-- `GET /api/bars`：读取 D/W/M K 线。
+- `GET /api/bars`：读取 1/5/15/30/60 分钟和 D/W/M K 线。
+- `GET /api/chart`：读取 K 线及分析/标注结果。
+- `GET /api/data/health`：读取数据覆盖和补数建议。
 - `GET /api/analysis/chan`：缠论分型分析。
 - `GET /api/analysis/wave`：波浪 ZigZag 候选波段。
 - `GET /api/annotations`：读取标注。
@@ -93,7 +105,7 @@ DuckDB 文件位置：`~/.aether_stock_analysis/aether.duckdb`。
 
 ## 扩展路径
 
-- 分钟线：新增 `bars_intraday` 表和 `TdxMinuteAdapter`，从 `minline/fzline` 读取 1 分钟和 5 分钟数据。
+- 分钟线：已从 `minline/fzline` 读取 1 分钟和 5 分钟数据；15/30/60 分钟由 5 分钟线按 A 股上午/下午交易时段聚合，并过滤不完整桶。
 - 缠论：在分析层增加包含处理、笔、线段、中枢，输出统一 overlay。
 - 波浪：当前已有 ZigZag 候选波段；后续增加浪型编号规则、人工浪级修正和多候选路径。
 - 回测：基于行情缓存和分析结果建立策略条件、交易模拟和统计报表。

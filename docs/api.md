@@ -21,16 +21,25 @@
 
 - `POST /imports/daily`
   - 请求：`{"path": null, "markets": ["sh", "sz", "bj"], "limit_files": null}`
-  - 解析 `lday/*.day` 并写入 DuckDB。
+  - 解析 `lday/*.day`、`minline/*.lc1`、`fzline/*.lc5` 并写入 DuckDB。
   - 导入时按 `symbol + trade_date` 去重。
+- `POST /imports/jobs`
+  - 请求同 `/imports/daily`，立即返回后台导入任务。
+- `GET /imports/jobs/{job_id}`
+  - 返回导入任务状态和进度，包含日线文件、分钟文件、K 线数量和错误列表。
 
 ## 行情
 
 - `GET /symbols?q=600000&limit=80`
   - 搜索证券索引。
 - `GET /bars?symbol=sh600000&timeframe=D&limit=520`
-  - 支持 `D`、`W`、`M`。
+  - 支持 `1M`、`5M`、`15M`、`30M`、`60M`、`D`、`W`、`M`。
   - `W/M` 由日线聚合生成。
+  - `15M/30M/60M` 由 5 分钟线按 A 股 09:30-11:30、13:00-15:00 两段交易时段聚合，只返回完整桶。
+- `GET /chart?symbol=sh600000&timeframe=15m&limit=520`
+  - 返回 K 线、缠论分型、波浪候选和人工标注。
+- `GET /data/health`
+  - 返回本地库数据覆盖、周期可用性和补数建议。
 
 ## 分析
 
