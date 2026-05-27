@@ -16,19 +16,27 @@ from .schemas import (
     AnnotationCreate,
     AnnotationRecord,
     AnnotationUpdate,
+    AnalysisSchemeImportResult,
+    AnalysisSchemePayload,
     BarRecord,
     DataHealthResponse,
     DataRecommendation,
+    ImportJob,
     MarketCoverage,
     RuleProfile,
     RuleProfileCreate,
+    ReviewNoteSave,
     SymbolRecord,
     TimeframeCoverage,
+    UserBackupImportResult,
+    UserBackupPayload,
 )
 
 
 _init_lock = threading.Lock()
 _initialized_db_path: Path | None = None
+_VALID_TIMEFRAMES = {"D", "W", "M", "1M", "5M", "15M", "30M", "60M"}
+IMPORT_JOBS_RETENTION = 200
 
 
 def connect() -> duckdb.DuckDBPyConnection:
@@ -152,6 +160,33 @@ def init_db(conn: duckdb.DuckDBPyConnection) -> None:
         """
         CREATE INDEX IF NOT EXISTS rule_profiles_type_idx
         ON rule_profiles(analysis_type)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS import_jobs (
+            id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            source_path TEXT,
+            files_seen INTEGER NOT NULL DEFAULT 0,
+            files_imported INTEGER NOT NULL DEFAULT 0,
+            bars_imported INTEGER NOT NULL DEFAULT 0,
+            minute_files_seen INTEGER NOT NULL DEFAULT 0,
+            minute_files_imported INTEGER NOT NULL DEFAULT 0,
+            minute_bars_imported INTEGER NOT NULL DEFAULT 0,
+            symbols_imported INTEGER NOT NULL DEFAULT 0,
+            errors TEXT NOT NULL DEFAULT '[]',
+            message TEXT,
+            started_at TIMESTAMP,
+            finished_at TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT now()
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS import_jobs_id_idx
+        ON import_jobs(id)
         """
     )
     seed_default_profiles(conn)
@@ -292,8 +327,8 @@ def migrate_annotations_schema(conn: duckdb.DuckDBPyConnection) -> None:
             timeframe TEXT NOT NULL,
             overlay_type TEXT NOT NULL,
             payload TEXT NOT NULL,
-            created_at TIMESTAMP NOT NULL,
-            updated_at TIMESTAMP NOT NULL
+            created_at TIMESTAMP NOT NULL DEFAULT now(),
+            updated_at TIMESTAMP NOT NULL DEFAULT now()
         )
         """
     )
@@ -589,10 +624,23 @@ def get_bars(
 
     if timeframe == "D":
         query = """
+            WITH daily AS (
+                SELECT
+                    symbol,
+                    trade_date,
+                    any_value(open) AS open,
+                    any_value(high) AS high,
+                    any_value(low) AS low,
+                    any_value(close) AS close,
+                    any_value(amount) AS amount,
+                    any_value(volume) AS volume
+                FROM bars_daily
+                WHERE symbol = ?
+                {date_filters}
+                GROUP BY symbol, trade_date
+            )
             SELECT symbol, 'D' AS timeframe, trade_date, open, high, low, close, amount, volume
-            FROM bars_daily
-            WHERE symbol = ?
-            {date_filters}
+            FROM daily
             ORDER BY trade_date DESC
             LIMIT ?
         """.format(date_filters=date_filters)
@@ -607,10 +655,20 @@ def get_bars(
         rows = conn.execute(
             """
             WITH base AS (
-                SELECT *, {bucket} AS bucket_date
+                SELECT
+                    symbol,
+                    trade_date,
+                    any_value(open) AS open,
+                    any_value(high) AS high,
+                    any_value(low) AS low,
+                    any_value(close) AS close,
+                    any_value(amount) AS amount,
+                    any_value(volume) AS volume,
+                    {bucket} AS bucket_date
                 FROM bars_daily
                 WHERE symbol = ?
                 {date_filters}
+                GROUP BY symbol, trade_date
             ),
             grouped AS (
                 SELECT
@@ -654,15 +712,28 @@ def get_minute_bars(
     if interval_minutes in {1, 5}:
         rows = conn.execute(
             """
+            WITH minute AS (
+                SELECT
+                    symbol,
+                    trade_time,
+                    any_value(open) AS open,
+                    any_value(high) AS high,
+                    any_value(low) AS low,
+                    any_value(close) AS close,
+                    any_value(amount) AS amount,
+                    any_value(volume) AS volume
+                FROM bars_minute
+                WHERE symbol = ?
+                  AND interval_minutes = ?
+                {date_filters}
+                GROUP BY symbol, trade_time
+            )
             SELECT symbol, ? AS timeframe, trade_time, open, high, low, close, amount, volume
-            FROM bars_minute
-            WHERE symbol = ?
-              AND interval_minutes = ?
-            {date_filters}
+            FROM minute
             ORDER BY trade_time DESC
             LIMIT ?
             """.format(date_filters=date_filters),
-            [timeframe, symbol.lower(), interval_minutes, *date_params, limit],
+            [symbol.lower(), interval_minutes, *date_params, timeframe, limit],
         ).fetchall()
         rows.reverse()
         return [BarRecord(**_bar_row(row)) for row in rows]
@@ -673,7 +744,14 @@ def get_minute_bars(
         """
         WITH base AS (
             SELECT
-                *,
+                symbol,
+                trade_time,
+                any_value(open) AS open,
+                any_value(high) AS high,
+                any_value(low) AS low,
+                any_value(close) AS close,
+                any_value(amount) AS amount,
+                any_value(volume) AS volume,
                 CASE
                     WHEN CAST(trade_time AS TIME) > TIME '09:30:00'
                      AND CAST(trade_time AS TIME) <= TIME '11:30:00'
@@ -687,6 +765,7 @@ def get_minute_bars(
             WHERE symbol = ?
               AND interval_minutes = 5
             {date_filters}
+            GROUP BY symbol, trade_time
         ),
         bucketed AS (
             SELECT
@@ -745,22 +824,81 @@ def list_annotations(
     symbol: str,
     timeframe: str,
 ) -> list[AnnotationRecord]:
+    normalized_symbol = _normalize_symbol(symbol)
+    normalized_timeframe = _normalize_timeframe(timeframe)
     rows = conn.execute(
         """
         SELECT id, symbol, timeframe, overlay_type, payload, created_at, updated_at
         FROM annotations
         WHERE symbol = ? AND timeframe = ?
-        ORDER BY updated_at DESC
+        ORDER BY updated_at DESC, id DESC
         """,
-        [symbol.lower(), timeframe.upper()],
+        [normalized_symbol, normalized_timeframe],
     ).fetchall()
     return [AnnotationRecord(**_annotation_row(row)) for row in rows]
+
+
+def list_review_notes(
+    conn: duckdb.DuckDBPyConnection,
+    symbol: str,
+    timeframe: str,
+) -> list[AnnotationRecord]:
+    normalized_symbol = _normalize_symbol(symbol)
+    normalized_timeframe = _normalize_timeframe(timeframe)
+    rows = conn.execute(
+        """
+        SELECT id, symbol, timeframe, overlay_type, payload, created_at, updated_at
+        FROM annotations
+        WHERE symbol = ? AND timeframe = ? AND overlay_type = 'review_note'
+        ORDER BY updated_at DESC, id DESC
+        """,
+        [normalized_symbol, normalized_timeframe],
+    ).fetchall()
+    return [AnnotationRecord(**_annotation_row(row)) for row in rows]
+
+
+def save_review_note(conn: duckdb.DuckDBPyConnection, item: ReviewNoteSave) -> AnnotationRecord:
+    normalized_title = item.title.strip() or "复盘笔记"
+    normalized_content = item.content.strip()
+    if not normalized_content:
+        raise ValueError("复盘笔记 content 不能为空。")
+    normalized_tags: list[str] = []
+    seen_tags: set[str] = set()
+    for tag in item.tags:
+        normalized_tag = tag.strip()
+        if not normalized_tag or normalized_tag in seen_tags:
+            continue
+        seen_tags.add(normalized_tag)
+        normalized_tags.append(normalized_tag)
+    payload = {
+        **item.payload,
+        "title": normalized_title,
+        "content": normalized_content,
+        "tags": normalized_tags,
+        "source": item.payload.get("source", "review-panel"),
+    }
+    return create_annotation(
+        conn,
+        AnnotationCreate(
+            symbol=item.symbol,
+            timeframe=item.timeframe,
+            overlay_type="review_note",
+            payload=payload,
+        ),
+    )
 
 
 def create_annotation(conn: duckdb.DuckDBPyConnection, item: AnnotationCreate) -> AnnotationRecord:
     annotation_id = str(uuid.uuid4())
     created_at = utc_now()
     updated_at = created_at
+    normalized_symbol = _normalize_symbol(item.symbol)
+    normalized_timeframe = _normalize_timeframe(item.timeframe)
+    normalized_overlay_type = _normalize_overlay_type(item.overlay_type)
+    if _is_active_manual_structure(normalized_overlay_type, item.payload):
+        _deactivate_other_manual_structures(
+            conn, normalized_symbol, normalized_timeframe, normalized_overlay_type, annotation_id, updated_at
+        )
     payload = json.dumps(item.payload, ensure_ascii=False)
     conn.execute(
         """
@@ -770,9 +908,9 @@ def create_annotation(conn: duckdb.DuckDBPyConnection, item: AnnotationCreate) -
         """,
         [
             annotation_id,
-            item.symbol.lower(),
-            item.timeframe.upper(),
-            item.overlay_type,
+            normalized_symbol,
+            normalized_timeframe,
+            normalized_overlay_type,
             payload,
             created_at,
             updated_at,
@@ -790,14 +928,20 @@ def update_annotation(
     if current is None:
         return None
     overlay_type = item.overlay_type if item.overlay_type is not None else current.overlay_type
+    normalized_overlay_type = _normalize_overlay_type(overlay_type)
     payload = item.payload if item.payload is not None else current.payload
+    updated_at = utc_now()
+    if _is_active_manual_structure(normalized_overlay_type, payload):
+        _deactivate_other_manual_structures(
+            conn, current.symbol, current.timeframe, normalized_overlay_type, annotation_id, updated_at
+        )
     conn.execute(
         """
         UPDATE annotations
         SET overlay_type = ?, payload = ?, updated_at = ?
         WHERE id = ?
         """,
-        [overlay_type, json.dumps(payload, ensure_ascii=False), utc_now(), annotation_id],
+        [normalized_overlay_type, json.dumps(payload, ensure_ascii=False), updated_at, annotation_id],
     )
     return get_annotation(conn, annotation_id)
 
@@ -837,7 +981,7 @@ def list_rule_profiles(conn: duckdb.DuckDBPyConnection, analysis_type: str | Non
             SELECT id, name, analysis_type, version, params, is_default, created_at, updated_at
             FROM rule_profiles
             WHERE analysis_type = ?
-            ORDER BY is_default DESC, updated_at DESC
+            ORDER BY is_default DESC, updated_at DESC, id DESC
             """,
             [analysis_type],
         ).fetchall()
@@ -846,7 +990,7 @@ def list_rule_profiles(conn: duckdb.DuckDBPyConnection, analysis_type: str | Non
             """
             SELECT id, name, analysis_type, version, params, is_default, created_at, updated_at
             FROM rule_profiles
-            ORDER BY analysis_type, is_default DESC, updated_at DESC
+            ORDER BY analysis_type, is_default DESC, updated_at DESC, id DESC
             """
         ).fetchall()
     return [RuleProfile(**_rule_profile_row(row)) for row in rows]
@@ -878,16 +1022,508 @@ def create_rule_profile(conn: duckdb.DuckDBPyConnection, item: RuleProfileCreate
     return list_rule_profiles(conn, item.analysis_type)[0]
 
 
+def save_import_job(conn: duckdb.DuckDBPyConnection, item: ImportJob) -> None:
+    updated_at = utc_now()
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        conn.execute("DELETE FROM import_jobs WHERE id = ?", [item.id])
+        conn.execute(
+            """
+            INSERT INTO import_jobs
+            (
+                id, status, source_path, files_seen, files_imported, bars_imported,
+                minute_files_seen, minute_files_imported, minute_bars_imported, symbols_imported,
+                errors, message, started_at, finished_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                item.id,
+                item.status,
+                item.source_path,
+                item.files_seen,
+                item.files_imported,
+                item.bars_imported,
+                item.minute_files_seen,
+                item.minute_files_imported,
+                item.minute_bars_imported,
+                item.symbols_imported,
+                json.dumps(item.errors, ensure_ascii=False),
+                item.message,
+                item.started_at,
+                item.finished_at,
+                updated_at,
+            ],
+        )
+        _prune_import_jobs(conn, IMPORT_JOBS_RETENTION)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def get_import_job(conn: duckdb.DuckDBPyConnection, job_id: str) -> ImportJob | None:
+    row = conn.execute(
+        """
+        SELECT
+            id, status, source_path, files_seen, files_imported, bars_imported,
+            minute_files_seen, minute_files_imported, minute_bars_imported, symbols_imported,
+            errors, message, started_at, finished_at
+        FROM import_jobs
+        WHERE id = ?
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        [job_id],
+    ).fetchone()
+    return ImportJob(**_import_job_row(row)) if row else None
+
+
+def list_import_jobs(
+    conn: duckdb.DuckDBPyConnection,
+    limit: int = 20,
+    status: str | None = None,
+    source_path_exists: bool | None = None,
+) -> list[ImportJob]:
+    should_apply_sql_limit = source_path_exists is None
+    sql_limit_clause = "LIMIT ?" if should_apply_sql_limit else ""
+    sql_limit_params = [limit] if should_apply_sql_limit else []
+
+    if status is None:
+        rows = conn.execute(
+            f"""
+            SELECT
+                id, status, source_path, files_seen, files_imported, bars_imported,
+                minute_files_seen, minute_files_imported, minute_bars_imported, symbols_imported,
+                errors, message, started_at, finished_at
+            FROM import_jobs
+            ORDER BY updated_at DESC, id DESC
+            {sql_limit_clause}
+            """,
+            sql_limit_params,
+        ).fetchall()
+    elif status == "pending":
+        rows = conn.execute(
+            f"""
+            SELECT
+                id, status, source_path, files_seen, files_imported, bars_imported,
+                minute_files_seen, minute_files_imported, minute_bars_imported, symbols_imported,
+                errors, message, started_at, finished_at
+            FROM import_jobs
+            WHERE status IN ('queued', 'running')
+            ORDER BY updated_at DESC, id DESC
+            {sql_limit_clause}
+            """,
+            sql_limit_params,
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"""
+            SELECT
+                id, status, source_path, files_seen, files_imported, bars_imported,
+                minute_files_seen, minute_files_imported, minute_bars_imported, symbols_imported,
+                errors, message, started_at, finished_at
+            FROM import_jobs
+            WHERE status = ?
+            ORDER BY updated_at DESC, id DESC
+            {sql_limit_clause}
+            """,
+            [status, *sql_limit_params],
+        ).fetchall()
+    items = [ImportJob(**_import_job_row(row)) for row in rows]
+    if source_path_exists is None:
+        return items
+    return [item for item in items if item.source_path_exists is source_path_exists][:limit]
+
+
+def update_import_job(conn: duckdb.DuckDBPyConnection, job_id: str, **changes) -> ImportJob | None:
+    current = get_import_job(conn, job_id)
+    if current is None:
+        return None
+    updated = current.model_copy(update=changes)
+    save_import_job(conn, updated)
+    return updated
+
+
+def fail_inactive_import_jobs(
+    conn: duckdb.DuckDBPyConnection,
+    active_job_ids: set[str],
+    reason: str,
+) -> int:
+    rows = conn.execute(
+        """
+        SELECT id, errors
+        FROM import_jobs
+        WHERE status IN ('queued', 'running')
+        ORDER BY updated_at DESC, id DESC
+        """
+    ).fetchall()
+    stale_rows = [(job_id, raw_errors) for job_id, raw_errors in rows if job_id not in active_job_ids]
+    if not stale_rows:
+        return 0
+    now = utc_now()
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        for job_id, raw_errors in stale_rows:
+            parsed_errors = json.loads(raw_errors) if raw_errors else []
+            if reason not in parsed_errors:
+                parsed_errors.append(reason)
+            conn.execute(
+                """
+                UPDATE import_jobs
+                SET status = 'failed', errors = ?, message = ?, finished_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                [json.dumps(parsed_errors, ensure_ascii=False), reason, now, now, job_id],
+            )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return len(stale_rows)
+
+
+def export_user_backup(conn: duckdb.DuckDBPyConnection, app_config: dict) -> UserBackupPayload:
+    annotations = _list_all_annotations(conn)
+    rule_profiles = list_rule_profiles(conn)
+    return UserBackupPayload(
+        schema_version=1,
+        exported_at=utc_now(),
+        config=dict(app_config),
+        annotations=annotations,
+        rule_profiles=rule_profiles,
+    )
+
+
+def import_user_backup(
+    conn: duckdb.DuckDBPyConnection,
+    payload: UserBackupPayload,
+) -> UserBackupImportResult:
+    _validate_rule_profile_ids_unique_per_analysis_type(payload.rule_profiles)
+    deduped_annotations = _dedupe_annotations_by_id(payload.annotations)
+    _validate_annotation_ids(deduped_annotations)
+    _validate_annotation_overlay_types(deduped_annotations)
+    _validate_annotation_symbols(deduped_annotations)
+    _validate_annotation_timeframes(deduped_annotations)
+    deduped_rule_profiles = _dedupe_rule_profiles_by_id(payload.rule_profiles)
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        for item in deduped_annotations:
+            conn.execute("DELETE FROM annotations WHERE id = ?", [item.id])
+            normalized_symbol = _normalize_symbol(item.symbol)
+            normalized_timeframe = _normalize_timeframe(item.timeframe)
+            normalized_overlay_type = _normalize_overlay_type(item.overlay_type)
+            conn.execute(
+                """
+                INSERT INTO annotations
+                (id, symbol, timeframe, overlay_type, payload, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    item.id,
+                    normalized_symbol,
+                    normalized_timeframe,
+                    normalized_overlay_type,
+                    json.dumps(item.payload, ensure_ascii=False),
+                    item.created_at,
+                    item.updated_at,
+                ],
+            )
+        _normalize_active_manual_structures(conn)
+        for item in deduped_rule_profiles:
+            conn.execute("DELETE FROM rule_profiles WHERE id = ?", [item.id])
+            if item.is_default:
+                conn.execute("UPDATE rule_profiles SET is_default = false WHERE analysis_type = ?", [item.analysis_type])
+            conn.execute(
+                """
+                INSERT INTO rule_profiles
+                (id, name, analysis_type, version, params, is_default, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    item.id,
+                    item.name,
+                    item.analysis_type,
+                    item.version,
+                    json.dumps(item.params, ensure_ascii=False),
+                    item.is_default,
+                    item.created_at,
+                    item.updated_at,
+                ],
+            )
+        _ensure_default_rule_profiles(conn)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return UserBackupImportResult(
+        config_imported=bool(payload.config),
+        annotations_imported=len(deduped_annotations),
+        rule_profiles_imported=len(deduped_rule_profiles),
+    )
+
+
+def export_analysis_scheme(
+    conn: duckdb.DuckDBPyConnection,
+    name: str = "AetherStock 分析方案",
+    description: str = "",
+) -> AnalysisSchemePayload:
+    return AnalysisSchemePayload(
+        schema_version=1,
+        exported_at=utc_now(),
+        name=name,
+        description=description,
+        rule_profiles=list_rule_profiles(conn),
+    )
+
+
+def import_analysis_scheme(
+    conn: duckdb.DuckDBPyConnection,
+    payload: AnalysisSchemePayload,
+) -> AnalysisSchemeImportResult:
+    _validate_rule_profile_ids_unique_per_analysis_type(payload.rule_profiles)
+    deduped_rule_profiles = _dedupe_rule_profiles_by_id(payload.rule_profiles)
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        imported_analysis_types = sorted({item.analysis_type for item in deduped_rule_profiles})
+        for analysis_type in imported_analysis_types:
+            conn.execute("DELETE FROM rule_profiles WHERE analysis_type = ?", [analysis_type])
+
+        for item in deduped_rule_profiles:
+            if item.is_default:
+                conn.execute("UPDATE rule_profiles SET is_default = false WHERE analysis_type = ?", [item.analysis_type])
+            conn.execute(
+                """
+                INSERT INTO rule_profiles
+                (id, name, analysis_type, version, params, is_default, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    item.id,
+                    item.name,
+                    item.analysis_type,
+                    item.version,
+                    json.dumps(item.params, ensure_ascii=False),
+                    item.is_default,
+                    item.created_at,
+                    item.updated_at,
+                ],
+            )
+        _ensure_default_rule_profiles(conn)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return AnalysisSchemeImportResult(rule_profiles_imported=len(deduped_rule_profiles))
+
+
+def _dedupe_rule_profiles_by_id(items: list[RuleProfile]) -> list[RuleProfile]:
+    seen_ids: set[str] = set()
+    deduped_reversed: list[RuleProfile] = []
+    for item in reversed(items):
+        if item.id in seen_ids:
+            continue
+        seen_ids.add(item.id)
+        deduped_reversed.append(item)
+    deduped_reversed.reverse()
+    return deduped_reversed
+
+
+def _validate_rule_profile_ids_unique_per_analysis_type(items: list[RuleProfile]) -> None:
+    seen_types_by_id: dict[str, str] = {}
+    for item in items:
+        if not item.id.strip():
+            raise ValueError("规则 ID 不能为空。")
+        previous_type = seen_types_by_id.get(item.id)
+        if previous_type is None:
+            seen_types_by_id[item.id] = item.analysis_type
+            continue
+        if previous_type != item.analysis_type:
+            raise ValueError(f"规则 ID 冲突：{item.id} 同时用于 {previous_type} 和 {item.analysis_type}。")
+
+
+def _dedupe_annotations_by_id(items: list[AnnotationRecord]) -> list[AnnotationRecord]:
+    seen_ids: set[str] = set()
+    deduped_reversed: list[AnnotationRecord] = []
+    for item in reversed(items):
+        if item.id in seen_ids:
+            continue
+        seen_ids.add(item.id)
+        deduped_reversed.append(item)
+    deduped_reversed.reverse()
+    return deduped_reversed
+
+
+def _validate_annotation_timeframes(items: list[AnnotationRecord]) -> None:
+    for item in items:
+        try:
+            _normalize_timeframe(item.timeframe)
+        except ValueError:
+            raise ValueError(f"标注 timeframe 不支持：{item.timeframe}")
+
+
+def _validate_annotation_ids(items: list[AnnotationRecord]) -> None:
+    for item in items:
+        if not item.id.strip():
+            raise ValueError("标注 ID 不能为空。")
+
+
+def _validate_annotation_overlay_types(items: list[AnnotationRecord]) -> None:
+    for item in items:
+        try:
+            _normalize_overlay_type(item.overlay_type)
+        except ValueError:
+            raise ValueError("标注 overlay_type 不能为空。")
+
+
+def _validate_annotation_symbols(items: list[AnnotationRecord]) -> None:
+    for item in items:
+        try:
+            _normalize_symbol(item.symbol)
+        except ValueError:
+            raise ValueError("标注 symbol 不能为空。")
+
+
+def _normalize_timeframe(value: str) -> str:
+    normalized = value.strip().upper()
+    if normalized not in _VALID_TIMEFRAMES:
+        raise ValueError(f"timeframe 不支持：{value}")
+    return normalized
+
+
+def _normalize_symbol(value: str) -> str:
+    normalized = value.strip().lower()
+    if not normalized:
+        raise ValueError("标注 symbol 不能为空。")
+    return normalized
+
+
+def _normalize_overlay_type(value: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError("标注 overlay_type 不能为空。")
+    return normalized
+
+
+def _list_all_annotations(conn: duckdb.DuckDBPyConnection) -> list[AnnotationRecord]:
+    rows = conn.execute(
+        """
+        SELECT id, symbol, timeframe, overlay_type, payload, created_at, updated_at
+        FROM annotations
+        ORDER BY symbol, timeframe, updated_at DESC, id DESC
+        """
+    ).fetchall()
+    return [AnnotationRecord(**_annotation_row(row)) for row in rows]
+
+
+def _is_active_manual_structure(overlay_type: str, payload: dict) -> bool:
+    return overlay_type in {"chan", "wave"} and payload.get("active") is not False
+
+
+def _deactivate_other_manual_structures(
+    conn: duckdb.DuckDBPyConnection,
+    symbol: str,
+    timeframe: str,
+    overlay_type: str,
+    active_annotation_id: str,
+    updated_at: datetime,
+) -> None:
+    rows = conn.execute(
+        """
+        SELECT id, payload
+        FROM annotations
+        WHERE symbol = ? AND timeframe = ? AND overlay_type = ? AND id != ?
+        """,
+        [symbol.lower(), timeframe.upper(), overlay_type, active_annotation_id],
+    ).fetchall()
+    for annotation_id, raw_payload in rows:
+        payload = json.loads(raw_payload) if raw_payload else {}
+        if payload.get("active") is False:
+            continue
+        payload["active"] = False
+        payload["deactivated_at"] = updated_at.isoformat()
+        payload["deactivated_reason"] = "superseded_by_new_manual_structure"
+        conn.execute(
+            """
+            UPDATE annotations
+            SET payload = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            [json.dumps(payload, ensure_ascii=False), updated_at, annotation_id],
+        )
+
+
+def _normalize_active_manual_structures(conn: duckdb.DuckDBPyConnection) -> None:
+    rows = conn.execute(
+        """
+        SELECT id, symbol, timeframe, overlay_type, payload, updated_at
+        FROM annotations
+        WHERE overlay_type IN ('chan', 'wave')
+        ORDER BY symbol, timeframe, overlay_type, updated_at DESC, id DESC
+        """
+    ).fetchall()
+    active_keys: set[tuple[str, str, str]] = set()
+    for annotation_id, symbol, timeframe, overlay_type, raw_payload, updated_at in rows:
+        payload = json.loads(raw_payload) if raw_payload else {}
+        if not _is_active_manual_structure(overlay_type, payload):
+            continue
+        key = (symbol, timeframe, overlay_type)
+        if key not in active_keys:
+            active_keys.add(key)
+            continue
+        payload["active"] = False
+        payload["deactivated_at"] = updated_at.isoformat()
+        payload["deactivated_reason"] = "superseded_during_backup_import"
+        conn.execute(
+            """
+            UPDATE annotations
+            SET payload = ?
+            WHERE id = ?
+            """,
+            [json.dumps(payload, ensure_ascii=False), annotation_id],
+        )
+
+
+def _ensure_default_rule_profiles(conn: duckdb.DuckDBPyConnection) -> None:
+    analysis_types = conn.execute("SELECT DISTINCT analysis_type FROM rule_profiles").fetchall()
+    for (analysis_type,) in analysis_types:
+        default_count = conn.execute(
+            "SELECT count(*) FROM rule_profiles WHERE analysis_type = ? AND is_default = true",
+            [analysis_type],
+        ).fetchone()[0]
+        if default_count > 0:
+            continue
+        latest = conn.execute(
+            """
+            SELECT id
+            FROM rule_profiles
+            WHERE analysis_type = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """,
+            [analysis_type],
+        ).fetchone()
+        if latest is None:
+            continue
+        conn.execute("UPDATE rule_profiles SET is_default = true WHERE id = ?", [latest[0]])
+
+
 def seed_default_profiles(conn: duckdb.DuckDBPyConnection) -> None:
     count = conn.execute("SELECT count(*) FROM rule_profiles").fetchone()[0]
     if count > 0:
         return
     defaults = [
         RuleProfileCreate(
-            name="缠论默认分型",
+            name="缠论默认分型 / 笔 / 线段 / 中枢",
             analysis_type="chan",
-            version="0.1.0",
-            params={"strict_fractal": False, "include_containment": False, "min_bars_for_bi": 5},
+            version="0.5.0",
+            params={
+                "strict_fractal": False,
+                "include_containment": True,
+                "min_bars_for_bi": 5,
+                "min_bis_for_segment": 3,
+                "min_bis_for_zhongshu": 3,
+            },
             is_default=True,
         ),
         RuleProfileCreate(
@@ -927,7 +1563,7 @@ def import_daily_files(
     markets: list[str] | None = None,
     limit_files: int | None = None,
     progress: Callable[[dict], None] | None = None,
-) -> tuple[int, int, int, list[str]]:
+) -> tuple[int, int, int, int, int, list[str]]:
     errors: list[str] = []
     bars_imported = 0
     minute_bars_imported = 0
@@ -1030,7 +1666,7 @@ def import_daily_files(
                     emit_progress("解析分钟线文件时遇到错误。")
 
         if bars_imported == 0 and minute_bars_imported == 0:
-            return files_imported, bars_imported, minute_bars_imported, errors
+            return files_imported, bars_imported, minute_files_seen, minute_files_imported, minute_bars_imported, errors
 
         with connect() as conn:
             emit_progress("正在写入本地数据库。")
@@ -1151,7 +1787,7 @@ def import_daily_files(
             Path(csv_path).unlink(missing_ok=True)
         if minute_csv_path:
             Path(minute_csv_path).unlink(missing_ok=True)
-    return files_imported, bars_imported, minute_bars_imported, errors
+    return files_imported, bars_imported, minute_files_seen, minute_files_imported, minute_bars_imported, errors
 
 
 def _symbol_row(row: tuple) -> dict:
@@ -1238,6 +1874,65 @@ def _rule_profile_row(row: tuple) -> dict:
         "created_at": _as_datetime(created_at),
         "updated_at": _as_datetime(updated_at),
     }
+
+
+def _import_job_row(row: tuple) -> dict:
+    (
+        job_id,
+        status,
+        source_path,
+        files_seen,
+        files_imported,
+        bars_imported,
+        minute_files_seen,
+        minute_files_imported,
+        minute_bars_imported,
+        symbols_imported,
+        errors,
+        message,
+        started_at,
+        finished_at,
+    ) = row
+    source_path_exists = None
+    if isinstance(source_path, str) and source_path.strip():
+        try:
+            source_path_exists = Path(source_path).expanduser().exists()
+        except (OSError, RuntimeError, ValueError):
+            source_path_exists = False
+    return {
+        "id": job_id,
+        "status": status,
+        "source_path": source_path,
+        "source_path_exists": source_path_exists,
+        "files_seen": int(files_seen),
+        "files_imported": int(files_imported),
+        "bars_imported": int(bars_imported),
+        "minute_files_seen": int(minute_files_seen),
+        "minute_files_imported": int(minute_files_imported),
+        "minute_bars_imported": int(minute_bars_imported),
+        "symbols_imported": int(symbols_imported),
+        "errors": json.loads(errors) if errors else [],
+        "message": message,
+        "started_at": _as_datetime(started_at) if started_at is not None else None,
+        "finished_at": _as_datetime(finished_at) if finished_at is not None else None,
+    }
+
+
+def _prune_import_jobs(conn: duckdb.DuckDBPyConnection, retention: int) -> None:
+    if retention < 1:
+        retention = 1
+    conn.execute(
+        """
+        DELETE FROM import_jobs
+        WHERE id IN (
+            SELECT id
+            FROM import_jobs
+            ORDER BY updated_at DESC, id DESC
+            OFFSET ?
+        )
+        """,
+        [retention],
+    )
 
 
 def _as_date(value) -> date | None:

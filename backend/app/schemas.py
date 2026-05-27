@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -33,10 +33,18 @@ class SourceResponse(BaseModel):
     health: DataSourceCandidate | None = None
 
 
+class HealthResponse(BaseModel):
+    status: str
+
+
+class DeleteResponse(BaseModel):
+    deleted: bool
+
+
 class ImportRequest(BaseModel):
     path: str | None = None
     markets: list[str] = Field(default_factory=lambda: ["sh", "sz", "bj"])
-    limit_files: int | None = None
+    limit_files: int | None = Field(default=None, ge=1)
 
 
 class ImportResult(BaseModel):
@@ -44,6 +52,8 @@ class ImportResult(BaseModel):
     files_seen: int
     files_imported: int
     bars_imported: int
+    minute_files_seen: int = 0
+    minute_files_imported: int = 0
     minute_bars_imported: int = 0
     symbols_imported: int
     errors: list[str] = Field(default_factory=list)
@@ -53,6 +63,7 @@ class ImportJob(BaseModel):
     id: str
     status: str
     source_path: str | None = None
+    source_path_exists: bool | None = None
     files_seen: int = 0
     files_imported: int = 0
     bars_imported: int = 0
@@ -135,12 +146,58 @@ class AnalysisPoint(BaseModel):
     kind: str
 
 
+class ChanBiSegment(BaseModel):
+    index: int
+    start_index: int
+    end_index: int
+    start_trade_date: str
+    end_trade_date: str
+    start_price: float
+    end_price: float
+    direction: str
+    start_kind: str
+    end_kind: str
+
+
+class ChanLineSegment(BaseModel):
+    index: int
+    start_bi_index: int
+    end_bi_index: int
+    start_index: int
+    end_index: int
+    start_trade_date: str
+    end_trade_date: str
+    start_price: float
+    end_price: float
+    direction: str
+    bi_count: int
+
+
+class ChanZhongshu(BaseModel):
+    index: int
+    start_bi_index: int
+    end_bi_index: int
+    start_index: int
+    end_index: int
+    start_trade_date: str
+    end_trade_date: str
+    low: float
+    high: float
+    mid: float
+    bi_count: int
+
+
 class ChanAnalysisResponse(BaseModel):
     symbol: str
     timeframe: str
     algorithm: str
     version: str
+    params: dict[str, Any] = Field(default_factory=dict)
+    generated_at: datetime
     fractals: list[AnalysisPoint]
+    bis: list[ChanBiSegment] = Field(default_factory=list)
+    segments: list[ChanLineSegment] = Field(default_factory=list)
+    zhongshu: list[ChanZhongshu] = Field(default_factory=list)
 
 
 class WavePoint(BaseModel):
@@ -156,8 +213,63 @@ class WaveAnalysisResponse(BaseModel):
     timeframe: str
     algorithm: str
     version: str
+    params: dict[str, Any] = Field(default_factory=dict)
+    generated_at: datetime
     threshold_pct: float
     pivots: list[WavePoint]
+
+
+class BacktestTrade(BaseModel):
+    index: int
+    entry_index: int
+    exit_index: int
+    entry_trade_date: str
+    exit_trade_date: str
+    entry_price: float
+    exit_price: float
+    return_pct: float
+    holding_bars: int
+    entry_signal: str
+    exit_signal: str
+    exit_reason: str
+
+
+class BacktestSummary(BaseModel):
+    total_trades: int = 0
+    winning_trades: int = 0
+    losing_trades: int = 0
+    win_rate: float = 0
+    total_return_pct: float = 0
+    average_return_pct: float = 0
+    max_drawdown_pct: float = 0
+    average_holding_bars: float = 0
+    min_holding_bars: int = 0
+    max_holding_bars: int = 0
+    median_holding_bars: float = 0
+
+
+class BacktestEquityPoint(BaseModel):
+    trade_index: int
+    trade_date: str
+    equity: float
+    equity_return_pct: float
+    drawdown_pct: float
+
+
+class BacktestResponse(BaseModel):
+    symbol: str
+    timeframe: str
+    algorithm: str
+    version: str
+    strategy: str
+    structure_source: str = "auto"
+    manual_annotation_id: str | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
+    generated_at: datetime
+    bars_tested: int
+    trades: list[BacktestTrade] = Field(default_factory=list)
+    equity_curve: list[BacktestEquityPoint] = Field(default_factory=list)
+    summary: BacktestSummary = Field(default_factory=BacktestSummary)
 
 
 class AnnotationCreate(BaseModel):
@@ -182,6 +294,15 @@ class AnnotationRecord(BaseModel):
     updated_at: datetime
 
 
+class ReviewNoteSave(BaseModel):
+    symbol: str
+    timeframe: str
+    content: str
+    title: str = "复盘笔记"
+    tags: list[str] = Field(default_factory=list)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
 class ChartDataResponse(BaseModel):
     bars: list[BarRecord]
     chan: ChanAnalysisResponse
@@ -192,7 +313,7 @@ class ChartDataResponse(BaseModel):
 class RuleProfile(BaseModel):
     id: str
     name: str
-    analysis_type: str
+    analysis_type: Literal["chan", "wave"]
     version: str
     params: dict[str, Any] = Field(default_factory=dict)
     is_default: bool = False
@@ -202,7 +323,34 @@ class RuleProfile(BaseModel):
 
 class RuleProfileCreate(BaseModel):
     name: str
-    analysis_type: str
+    analysis_type: Literal["chan", "wave"]
     version: str = "0.1.0"
     params: dict[str, Any] = Field(default_factory=dict)
     is_default: bool = False
+
+
+class UserBackupPayload(BaseModel):
+    schema_version: int = 1
+    exported_at: datetime | None = None
+    config: dict[str, Any] = Field(default_factory=dict)
+    annotations: list[AnnotationRecord] = Field(default_factory=list)
+    rule_profiles: list[RuleProfile] = Field(default_factory=list)
+
+
+class UserBackupImportResult(BaseModel):
+    config_imported: bool = False
+    annotations_imported: int = 0
+    rule_profiles_imported: int = 0
+
+
+class AnalysisSchemePayload(BaseModel):
+    schema_version: int = 1
+    exported_at: datetime | None = None
+    name: str = "AetherStock 分析方案"
+    description: str = ""
+    workspace: dict[str, Any] = Field(default_factory=dict)
+    rule_profiles: list[RuleProfile] = Field(default_factory=list)
+
+
+class AnalysisSchemeImportResult(BaseModel):
+    rule_profiles_imported: int = 0
