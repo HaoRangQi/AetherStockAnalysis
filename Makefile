@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help scope-guard docs-guard draft-guard limit-guard line-guard default-symbol-guard scheme-manual-lines-guard entry verify smoke round round-smoke
+.PHONY: help scope-guard docs-guard draft-guard limit-guard line-guard default-symbol-guard scheme-manual-lines-guard learning-page-guard entry verify smoke round round-smoke
 
 help:
 	@echo "Available targets:"
@@ -11,8 +11,9 @@ help:
 	@echo "  make limit-guard # 回测涨跌停比例 limit_pct 链路守护检查"
 	@echo "  make line-guard  # 手工划线链路守护检查"
 	@echo "  make default-symbol-guard # 默认标的与初始时间窗守护检查"
-	@echo "  make scheme-manual-lines-guard # 分析方案 manual_lines 链路守护检查"
-	@echo "  make verify      # scope-guard + docs-guard + draft-guard + limit-guard + line-guard + default-symbol-guard + scheme-manual-lines-guard + pytest + lint + build + diff --check"
+	@echo "  make scheme-manual-lines-guard # 分析方案 manual_lines / manual_line_style 链路守护检查"
+	@echo "  make learning-page-guard # 学习教程独立页面守护检查"
+	@echo "  make verify      # scope-guard + docs-guard + draft-guard + limit-guard + line-guard + default-symbol-guard + scheme-manual-lines-guard + learning-page-guard + pytest + lint + build + diff --check"
 	@echo "  make smoke       # 本地 smoke"
 	@echo "  make round       # 入口检查 + 一键验证"
 	@echo "  make round-smoke # 入口检查 + 一键验证 + smoke"
@@ -40,6 +41,9 @@ default-symbol-guard:
 
 scheme-manual-lines-guard:
 	./scripts/check_scheme_manual_lines_guard.sh
+
+learning-page-guard:
+	./scripts/check_learning_page_guard.sh
 
 verify:
 	./scripts/verify_local.sh

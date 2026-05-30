@@ -28,6 +28,21 @@ def test_cors_allows_vite_fallback_ports() -> None:
     assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:5175"
 
 
+def test_cors_rejects_untrusted_origins() -> None:
+    client = TestClient(app)
+    response = client.options(
+        "/api/health",
+        headers={
+            "Origin": "http://evil.example",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "access-control-allow-origin" not in response.headers
+    assert response.text == "Disallowed CORS origin"
+
+
 def test_openapi_documents_public_response_models() -> None:
     client = TestClient(app)
 

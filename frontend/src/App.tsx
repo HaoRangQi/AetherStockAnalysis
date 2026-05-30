@@ -64,7 +64,7 @@ import {
 } from "./api";
 import { type ChartClickAnchor, type ManualDrawLine, KLineChart, KLineChartHandle } from "./KLineChart";
 
-type Panel = "workbench" | "data" | "layers" | "review" | "settings";
+type Panel = "workbench" | "data" | "layers" | "review" | "learning" | "settings";
 type Theme = "light" | "dark";
 type AnnotationMode = "browse" | "edit";
 type MinuteDataState = "ready" | "downloaded" | "missing";
@@ -92,6 +92,16 @@ type RuleChangeItem = {
   current: string;
   next: string;
   changed: boolean;
+};
+
+type LearningTutorial = {
+  title: string;
+  category: string;
+  definition: string;
+  checklist: string[];
+  confirmation: string;
+  pitfalls: string[];
+  workbenchTips: string[];
 };
 
 type MinuteDataStatus = {
@@ -260,11 +270,106 @@ const defaultRuleDraft: RuleDraft = {
   waveMinSwingBars: 3,
 };
 
+const learningTutorials: LearningTutorial[] = [
+  {
+    title: "顶背离",
+    category: "背离",
+    definition: "价格刷新阶段高点，但对应波段推进力度、成交配合或上涨 K 线质量没有同步走强，属于潜在顶部转弱候选。",
+    checklist: [
+      "第二个高点高于前高，但涨幅、阳线实体或波浪候选推进幅度收窄。",
+      "两次高点之间需要有明确回落，避免把连续小幅抬升误判为背离。",
+      "右侧高点附近出现顶分型、长上影或跌破短线支撑时，候选信号更清晰。",
+    ],
+    confirmation: "跌破两高之间的回落低点、短期均衡区下沿或手工颈线后，再视为更强确认。",
+    pitfalls: ["只看到价格创新高就提前判断顶部。", "忽略大级别上升趋势中的正常震荡。"],
+    workbenchTips: ["打开波浪候选观察右侧高点推进是否变短。", "用手工划线连接两个高点和中间低点，复核跌破位置。"],
+  },
+  {
+    title: "底背离",
+    category: "背离",
+    definition: "价格刷新阶段低点，但下跌推进力度、阴线质量或波段下行幅度没有同步扩大，属于潜在底部转强候选。",
+    checklist: [
+      "第二个低点低于前低，但下跌幅度、阴线实体或波浪候选推进幅度收窄。",
+      "两次低点之间需要有明确反弹，结构上能区分左右两个低点。",
+      "右侧低点附近出现底分型、长下影或重新站回短线压力位时，候选信号更清晰。",
+    ],
+    confirmation: "突破两低之间的反弹高点、短期压力线或手工颈线后，再视为更强确认。",
+    pitfalls: ["下跌趋势里第一次放缓就当作反转。", "忽略跌破后继续扩展成新一段下跌的可能。"],
+    workbenchTips: ["打开缠论分型观察右侧是否已有底分型候选。", "用手工划线标出反弹高点，等待价格突破再复核。"],
+  },
+  {
+    title: "顶分型",
+    category: "分型",
+    definition: "三根 K 线中间一根的高点高于左右两根高点，是局部压力候选，不等同于趋势顶部。",
+    checklist: [
+      "中间 K 线高点同时高于前一根和后一根高点。",
+      "若存在包含关系，应先按当前缠论规则预处理后再观察。",
+      "顶分型之后若出现向下笔或跌破邻近低点，确认强度更高。",
+    ],
+    confirmation: "后一根 K 线完成后顶分型才成立；继续跌破附近低点时，才更接近可复核的反转证据。",
+    pitfalls: ["把未收完的当前 K 线提前当作已确认分型。", "忽略强趋势中连续顶分型可能只是震荡。"],
+    workbenchTips: ["打开“缠论分型”图层查看自动顶分型。", "必要时保存当前缠论并用人工分型修正明显误识别点。"],
+  },
+  {
+    title: "底分型",
+    category: "分型",
+    definition: "三根 K 线中间一根的低点低于左右两根低点，是局部支撑候选，不等同于趋势底部。",
+    checklist: [
+      "中间 K 线低点同时低于前一根和后一根低点。",
+      "若存在包含关系，应先按当前缠论规则预处理后再观察。",
+      "底分型之后若出现向上笔或突破邻近高点，确认强度更高。",
+    ],
+    confirmation: "后一根 K 线完成后底分型才成立；继续突破附近高点时，才更接近可复核的反转证据。",
+    pitfalls: ["在下跌加速中把单个底分型当作底部完成。", "只看最低价，不看后续是否有向上确认。"],
+    workbenchTips: ["打开“缠论分型”和“缠论笔”图层，观察底分型是否能派生出向上笔。", "人工新增底分型后，后端会重新派生笔、线段和中枢供复核。"],
+  },
+  {
+    title: "M 头",
+    category: "顶部形态",
+    definition: "价格两次冲高失败，中间形成回落低点；跌破该低点附近颈线后，顶部候选才进入确认阶段。",
+    checklist: [
+      "左峰和右峰高度接近，右峰可以略高或略低，但第二次上攻明显乏力。",
+      "两峰之间有清晰回落低点，可作为颈线参考。",
+      "右峰附近出现顶分型、顶背离或波浪高点后，候选结构更完整。",
+    ],
+    confirmation: "有效跌破颈线并无法快速收回时，M 头确认强度更高；未跌破前只作为候选。",
+    pitfalls: ["把普通箱体震荡误判成 M 头。", "颈线假跌破后快速收回，确认失败。"],
+    workbenchTips: ["用手工划线连接两峰和颈线，观察回踩或跌破位置。", "结合回测买卖点图层复核结构信号是否滞后。"],
+  },
+  {
+    title: "头肩顶",
+    category: "顶部形态",
+    definition: "左肩、头部、右肩依次出现，头部最高；跌破两肩之间低点连成的颈线后，顶部候选才算确认。",
+    checklist: [
+      "头部高于左肩和右肩，右肩反弹通常弱于头部。",
+      "左肩和右肩之间有两个相对清晰的回落低点，可连成颈线。",
+      "右肩附近出现顶分型、顶背离或向下笔时，候选更清晰。",
+    ],
+    confirmation: "跌破颈线并形成后续压制时，头肩顶确认强度更高；右肩未完成前不提前下结论。",
+    pitfalls: ["右肩尚未形成就提前识别。", "忽略倾斜颈线和大级别趋势造成的误判。"],
+    workbenchTips: ["用手工划线画出颈线，配合缠论笔观察右肩是否形成向下段。", "保存复盘笔记记录左肩、头部、右肩对应日期，便于后续对照。"],
+  },
+  {
+    title: "头肩底",
+    category: "底部形态",
+    definition: "左肩、头部、右肩依次出现，头部最低；突破两肩之间高点连成的颈线后，底部候选才算确认。",
+    checklist: [
+      "头部低于左肩和右肩，右肩回落通常弱于头部。",
+      "左肩和右肩之间有两个相对清晰的反弹高点，可连成颈线。",
+      "右肩附近出现底分型、底背离或向上笔时，候选更清晰。",
+    ],
+    confirmation: "突破颈线并能维持在颈线上方时，头肩底确认强度更高；未突破前只作为候选。",
+    pitfalls: ["把下跌中继震荡误判成底部反转。", "突破后快速跌回颈线下方，确认失败。"],
+    workbenchTips: ["用手工划线画出颈线，观察突破后是否回踩不破。", "结合波浪候选检查右肩下跌幅度是否小于头部。"],
+  },
+];
+
 const navItems = [
   { panel: "workbench" as const, label: "行情工作台", icon: CandlestickChart },
   { panel: "data" as const, label: "数据源", icon: Database },
   { panel: "layers" as const, label: "分析图层", icon: Layers3 },
   { panel: "review" as const, label: "复盘笔记", icon: BookOpenText },
+  { panel: "learning" as const, label: "学习教程", icon: FileText },
   { panel: "settings" as const, label: "设置", icon: Settings },
 ];
 
@@ -2395,8 +2500,28 @@ export function App() {
     setStatus("回测交易明细已导出");
   }
 
+  const learningPageActive = activePanel === "learning";
+  const renderPanelTabs = () => (
+    <div className="panel-tabs" aria-label="功能面板">
+      {navItems.map((item) => {
+        const Icon = item.icon;
+        return (
+          <button
+            key={item.panel}
+            className={activePanel === item.panel ? "selected" : ""}
+            onClick={() => setActivePanel(item.panel)}
+            title={item.label}
+          >
+            <Icon size={16} />
+            <span>{item.label.replace("行情", "")}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+
   return (
-    <main className="app-shell">
+    <main className={learningPageActive ? "app-shell learning-page-active" : "app-shell"}>
       <aside className="nav-rail" aria-label="主导航">
         {navItems.map((item) => {
           const Icon = item.icon;
@@ -2414,7 +2539,7 @@ export function App() {
         })}
       </aside>
 
-      <section className="left-pane">
+      {!learningPageActive && <section className="left-pane">
         <div className="brand">
           <div className="brand-mark">
             <Activity size={22} />
@@ -2541,16 +2666,17 @@ export function App() {
             )}
           </div>
         </section>
-      </section>
+      </section>}
 
-      <section className="workspace">
+      <section className={learningPageActive ? "workspace learning-workspace" : "workspace"}>
+        {learningPageActive && renderPanelTabs()}
         <header className="top-app-bar">
           <div className="symbol-heading">
-            <p className="eyebrow">当前标的</p>
-            <h2>{selectedName}</h2>
-            {selectedCode && <span>{selectedCode}</span>}
+            <p className="eyebrow">{learningPageActive ? "技术形态" : "当前标的"}</p>
+            <h2>{learningPageActive ? "学习教程" : selectedName}</h2>
+            {learningPageActive ? <span>不需要打开 K 线图，先按结构清单理解候选与确认</span> : selectedCode && <span>{selectedCode}</span>}
           </div>
-          <div className="top-bar-controls">
+          {!learningPageActive && <div className="top-bar-controls">
             <div className="segmented" aria-label="K 线周期">
               {timeframes.map((frame) => (
                 <button key={frame.value} className={timeframe === frame.value ? "selected" : ""} onClick={() => handleTimeframeChange(frame.value)}>
@@ -2613,144 +2739,135 @@ export function App() {
                 撤销划线
               </button>
             </div>
-          </div>
+          </div>}
         </header>
 
-        <section className="chart-surface">
-          <ChartErrorBoundary resetKey={`${selectedSymbol?.symbol ?? "none"}:${timeframe}:${fitContentToken}`}>
-            <KLineChart
-              ref={klineChartRef}
-              bars={bars}
-              analysis={displayedAnalysis}
-              waveAnalysis={displayedWaveAnalysis}
-              annotations={workbenchAnnotations}
-              backtestTrades={backtest?.trades ?? []}
-              layers={layers}
-              theme={theme}
-              fitContentToken={fitContentToken}
-              hasMoreHistory={hasMoreHistory}
-              isLoadingHistory={isLoadingHistory}
-              onLoadMoreHistory={loadMoreHistory}
-              manualLines={manualLinesForCurrentChart}
-              manualLineColor={manualLineStyle.color}
-              manualLineWidth={manualLineStyle.width}
-              lineDrawingMode={lineDrawingMode}
-              onLineDrawingHint={setStatus}
-              onCreateManualLine={handleCreateManualLine}
-              onChartClick={
-                movingAnnotationId
-                  ? handleMoveAnnotationToChart
-                  : pendingManualChanFractalKind
-                    ? handleAddManualChanFractalFromChart
-                  : pendingManualWavePivotKind
-                    ? handleAddManualWavePivotFromChart
-                    : undefined
-              }
-              emptyMessage={
-                selectedRangeMismatch
-                  ? "当前手动日期范围不覆盖该标的；请在右侧时间范围面板重置到标的最新区间。"
-                  : minuteFrameSelected
-                    ? minuteEmptyMessage
-                    : "先导入通达信行情数据，或选择已导入的证券。"
-              }
-            />
-          </ChartErrorBoundary>
-          {chartAction && (
-            <div className={`chart-action-card ${selectedMinuteStatus?.state ?? ""}`}>
-              <div>
-                <strong>{chartAction.title}</strong>
-                <span>{chartAction.detail}</span>
-              </div>
-              <button
-                className={chartAction.primary ? "filled-button compact-button" : "tonal-button compact-button"}
-                onClick={chartAction.primary ? () => void handleImport() : () => setActivePanel("data")}
-                disabled={busy || (chartAction.primary && !manualPath)}
-              >
-                {chartAction.primary ? <Download size={15} /> : <Database size={15} />}
-                {chartAction.label}
-              </button>
-            </div>
-          )}
-          {bars.length > 0 && (
-            <div className="history-hint">
-              <span>
-                {isLoadingHistory
-                  ? "正在加载更早 K 线"
-                  : hasMoreHistory
-                    ? "向左拖动 K 线可继续加载历史"
-                    : "已加载到本地最早数据"}
-              </span>
-              {hasMoreHistory && (
-                <button className="tonal-button compact-button" onClick={() => void loadMoreHistory()} disabled={isLoadingHistory}>
-                  {isLoadingHistory ? "加载中" : "加载更早"}
-                </button>
+        {learningPageActive ? (
+          renderLearningPage()
+        ) : (
+          <>
+            <section className="chart-surface">
+              <ChartErrorBoundary resetKey={`${selectedSymbol?.symbol ?? "none"}:${timeframe}:${fitContentToken}`}>
+                <KLineChart
+                  ref={klineChartRef}
+                  bars={bars}
+                  analysis={displayedAnalysis}
+                  waveAnalysis={displayedWaveAnalysis}
+                  annotations={workbenchAnnotations}
+                  backtestTrades={backtest?.trades ?? []}
+                  layers={layers}
+                  theme={theme}
+                  fitContentToken={fitContentToken}
+                  hasMoreHistory={hasMoreHistory}
+                  isLoadingHistory={isLoadingHistory}
+                  onLoadMoreHistory={loadMoreHistory}
+                  manualLines={manualLinesForCurrentChart}
+                  manualLineColor={manualLineStyle.color}
+                  manualLineWidth={manualLineStyle.width}
+                  lineDrawingMode={lineDrawingMode}
+                  onLineDrawingHint={setStatus}
+                  onCreateManualLine={handleCreateManualLine}
+                  onChartClick={
+                    movingAnnotationId
+                      ? handleMoveAnnotationToChart
+                      : pendingManualChanFractalKind
+                        ? handleAddManualChanFractalFromChart
+                      : pendingManualWavePivotKind
+                        ? handleAddManualWavePivotFromChart
+                        : undefined
+                  }
+                  emptyMessage={
+                    selectedRangeMismatch
+                      ? "当前手动日期范围不覆盖该标的；请在右侧时间范围面板重置到标的最新区间。"
+                      : minuteFrameSelected
+                        ? minuteEmptyMessage
+                        : "先导入通达信行情数据，或选择已导入的证券。"
+                  }
+                />
+              </ChartErrorBoundary>
+              {chartAction && (
+                <div className={`chart-action-card ${selectedMinuteStatus?.state ?? ""}`}>
+                  <div>
+                    <strong>{chartAction.title}</strong>
+                    <span>{chartAction.detail}</span>
+                  </div>
+                  <button
+                    className={chartAction.primary ? "filled-button compact-button" : "tonal-button compact-button"}
+                    onClick={chartAction.primary ? () => void handleImport() : () => setActivePanel("data")}
+                    disabled={busy || (chartAction.primary && !manualPath)}
+                  >
+                    {chartAction.primary ? <Download size={15} /> : <Database size={15} />}
+                    {chartAction.label}
+                  </button>
+                </div>
               )}
-            </div>
-          )}
-        </section>
+              {bars.length > 0 && (
+                <div className="history-hint">
+                  <span>
+                    {isLoadingHistory
+                      ? "正在加载更早 K 线"
+                      : hasMoreHistory
+                        ? "向左拖动 K 线可继续加载历史"
+                        : "已加载到本地最早数据"}
+                  </span>
+                  {hasMoreHistory && (
+                    <button className="tonal-button compact-button" onClick={() => void loadMoreHistory()} disabled={isLoadingHistory}>
+                      {isLoadingHistory ? "加载中" : "加载更早"}
+                    </button>
+                  )}
+                </div>
+              )}
+            </section>
 
-        <section className="bottom-sheet">
-          <div>
-            <strong>库内数据</strong>
-            <span>{dataStoreSummary}</span>
-          </div>
-          <div>
-            <strong>源文件</strong>
-            <span>{sourceUpdateSummary}</span>
-          </div>
-          <div>
-            <strong>当前周期</strong>
-            <span>
-              {selectedTimeframe.label}
-              {minuteFrameSelected && bars.length === 0 && " · 暂无分钟数据"}
-            </span>
-          </div>
-          <div>
-            <strong>图表状态</strong>
-            <span>{chartStatus}</span>
-          </div>
-          <div>
-            <strong>时间范围</strong>
-            <span>
-              {(loadedWindowStart ?? dateStart) || "-"} 至 {(loadedWindowEnd ?? dateEnd) || "-"}
-              {isLoadingHistory && " · 正在加载历史"}
-              {!hasMoreHistory && bars.length > 0 && " · 已到最早"}
-            </span>
-          </div>
-          <div>
-            <strong>本次导入</strong>
-            <span>
-              {importResult
-                ? `${importResult.files_imported}/${importResult.files_seen} 日线文件，${importResult.minute_files_imported}/${importResult.minute_files_seen} 分钟文件，${importResult.bars_imported.toLocaleString()} 根日线，${importResult.minute_bars_imported.toLocaleString()} 根分钟线`
-                : "尚未导入"}
-            </span>
-          </div>
-          <div>
-            <strong>草稿状态</strong>
-            <span title={workspaceDraftDetail}>{workspaceDraftSummary}</span>
-          </div>
-        </section>
+            <section className="bottom-sheet">
+              <div>
+                <strong>库内数据</strong>
+                <span>{dataStoreSummary}</span>
+              </div>
+              <div>
+                <strong>源文件</strong>
+                <span>{sourceUpdateSummary}</span>
+              </div>
+              <div>
+                <strong>当前周期</strong>
+                <span>
+                  {selectedTimeframe.label}
+                  {minuteFrameSelected && bars.length === 0 && " · 暂无分钟数据"}
+                </span>
+              </div>
+              <div>
+                <strong>图表状态</strong>
+                <span>{chartStatus}</span>
+              </div>
+              <div>
+                <strong>时间范围</strong>
+                <span>
+                  {(loadedWindowStart ?? dateStart) || "-"} 至 {(loadedWindowEnd ?? dateEnd) || "-"}
+                  {isLoadingHistory && " · 正在加载历史"}
+                  {!hasMoreHistory && bars.length > 0 && " · 已到最早"}
+                </span>
+              </div>
+              <div>
+                <strong>本次导入</strong>
+                <span>
+                  {importResult
+                    ? `${importResult.files_imported}/${importResult.files_seen} 日线文件，${importResult.minute_files_imported}/${importResult.minute_files_seen} 分钟文件，${importResult.bars_imported.toLocaleString()} 根日线，${importResult.minute_bars_imported.toLocaleString()} 根分钟线`
+                    : "尚未导入"}
+                </span>
+              </div>
+              <div>
+                <strong>草稿状态</strong>
+                <span title={workspaceDraftDetail}>{workspaceDraftSummary}</span>
+              </div>
+            </section>
+          </>
+        )}
       </section>
 
-      <aside className="right-pane">
-        <div className="panel-tabs" aria-label="功能面板">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            return (
-              <button
-                key={item.panel}
-                className={activePanel === item.panel ? "selected" : ""}
-                onClick={() => setActivePanel(item.panel)}
-                title={item.label}
-              >
-                <Icon size={16} />
-                <span>{item.label.replace("行情", "")}</span>
-              </button>
-            );
-          })}
-        </div>
+      {!learningPageActive && <aside className="right-pane">
+        {renderPanelTabs()}
         {renderSidePanel()}
-      </aside>
+      </aside>}
 
       {annotationDeleteTarget && (
         <div className="dialog-backdrop" role="presentation">
@@ -3007,6 +3124,66 @@ export function App() {
         {renderAnnotationPanel()}
         {renderRulePanel()}
       </>
+    );
+  }
+
+  function renderLearningPage() {
+    return (
+      <section className="learning-page">
+        <section className="surface learning-intro">
+          <div className="section-title">
+            <FileText size={18} />
+            <span>技术形态学习教程</span>
+          </div>
+          <p className="explain-text">以下内容用于辅助理解技术结构和复盘，不构成交易建议；形态未完成确认前只按候选处理。</p>
+          <div className="learning-category-row" aria-label="教程分类">
+            {["背离", "分型", "顶部形态", "底部形态"].map((category) => (
+              <span className="status-chip" key={category}>
+                {category}
+              </span>
+            ))}
+          </div>
+        </section>
+        <div className="learning-tutorial-grid">
+          {learningTutorials.map((tutorial) => (
+            <article className="rule-doc-item learning-tutorial-item learning-page-card" key={tutorial.title}>
+              <div className="learning-tutorial-heading">
+                <strong>{tutorial.title}</strong>
+                <span>{tutorial.category}</span>
+              </div>
+              <p>{tutorial.definition}</p>
+              <div className="learning-tutorial-block">
+                <span>识别清单</span>
+                <ul>
+                  {tutorial.checklist.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+              <div className="learning-tutorial-block">
+                <span>确认信号</span>
+                <p>{tutorial.confirmation}</p>
+              </div>
+              <div className="learning-tutorial-block">
+                <span>常见误判</span>
+                <ul>
+                  {tutorial.pitfalls.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+              <div className="learning-tutorial-block">
+                <span>工作台辅助验证</span>
+                <ul>
+                  {tutorial.workbenchTips.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
     );
   }
 
@@ -4816,8 +4993,16 @@ function parseAnalysisSchemeWorkspace(workspace: Record<string, unknown>): Parse
   const theme = parseThemeValue(workspace.theme);
   const activePanel = parseActivePanelValue(workspace.active_panel ?? workspace.activePanel);
   const importJobFilter = parseImportJobFilterValue(workspace.import_job_filter ?? workspace.importJobFilter);
-  const manualLineStyle = parseManualLineStyle(workspace.manual_line_style ?? workspace.manualLineStyle);
-  const manualLines = parseSchemeManualLines(workspace.manual_lines ?? workspace.manualLines);
+  const manualLineStyle = parseSchemeFieldWithCamelFallback(
+    workspace.manual_line_style,
+    workspace.manualLineStyle,
+    parseManualLineStyle,
+  );
+  const manualLines = parseSchemeFieldWithCamelFallback(
+    workspace.manual_lines,
+    workspace.manualLines,
+    parseSchemeManualLines,
+  );
   const normalizedDateRange = normalizeSchemeDateRange(
     parseSchemeDateInput(workspace.date_start ?? workspace.dateStart),
     parseSchemeDateInput(workspace.date_end ?? workspace.dateEnd),
@@ -4855,6 +5040,18 @@ function normalizeSchemeDateRange(
     return { dateStart: dateEnd, dateEnd: dateStart };
   }
   return { dateStart, dateEnd };
+}
+
+function parseSchemeFieldWithCamelFallback<T>(
+  snakeValue: unknown,
+  camelValue: unknown,
+  parser: (value: unknown) => T | null | undefined,
+): T | null | undefined {
+  const parsedSnakeValue = parser(snakeValue);
+  if (parsedSnakeValue !== undefined || snakeValue === null) {
+    return parsedSnakeValue;
+  }
+  return parser(camelValue);
 }
 
 function parseSchemeSymbol(value: unknown): SymbolRecord | null | undefined {
@@ -4936,12 +5133,16 @@ function parseManualLineStyle(value: unknown): ManualLineStyle | null | undefine
   }
   const colorRaw = value.color;
   const widthRaw = value.width;
-  const fallbackColor = DEFAULT_MANUAL_LINE_STYLE.color;
-  const color = normalizeManualLineColor(typeof colorRaw === "string" ? colorRaw : "", fallbackColor);
-  const width = normalizeManualLineWidth(Number(widthRaw));
+  if (typeof colorRaw !== "string" || !isManualLineColor(colorRaw)) {
+    return undefined;
+  }
+  const widthValue = Number(widthRaw);
+  if (!Number.isFinite(widthValue)) {
+    return undefined;
+  }
   return {
-    color,
-    width,
+    color: colorRaw.trim().toLowerCase(),
+    width: normalizeManualLineWidth(widthValue),
   };
 }
 
@@ -5114,6 +5315,7 @@ function parseActivePanelValue(value: unknown): Panel | null {
     normalized === "data" ||
     normalized === "layers" ||
     normalized === "review" ||
+    normalized === "learning" ||
     normalized === "settings"
   ) {
     return normalized as Panel;
@@ -6380,7 +6582,7 @@ function readActivePanel(): Panel {
   const storedCamelCase = safeLocalStorageGetItem("activePanel")?.trim().toLowerCase();
   const storedSnakeCase = safeLocalStorageGetItem("active_panel")?.trim().toLowerCase();
   const stored = storedCamelCase || storedSnakeCase;
-  if (stored === "data" || stored === "layers" || stored === "review" || stored === "settings") {
+  if (stored === "data" || stored === "layers" || stored === "review" || stored === "learning" || stored === "settings") {
     return stored;
   }
   return "workbench";
@@ -6522,7 +6724,11 @@ function readManualLineStyle(): ManualLineStyle {
 
 function normalizeManualLineColor(value: string, fallback: string): string {
   const normalized = value.trim();
-  return /^#[0-9a-fA-F]{6}$/.test(normalized) ? normalized.toLowerCase() : fallback;
+  return isManualLineColor(normalized) ? normalized.toLowerCase() : fallback;
+}
+
+function isManualLineColor(value: string): boolean {
+  return /^#[0-9a-fA-F]{6}$/.test(value.trim());
 }
 
 function normalizeManualLineWidth(value: number): number {

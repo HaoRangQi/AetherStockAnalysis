@@ -211,7 +211,7 @@
 
 - `GET /schemes/analysis?name=本地方案&description=复用参数`
   - 导出分析方案，包含 `schema_version`、`exported_at`、`name`、`description`、`workspace` 和 `rule_profiles`。
-  - 后端导出规则配置；前端会在 `workspace` 中补充当前标的上下文、图层开关、默认周期、时间范围、主题、波浪浪级、回测策略、回测成本参数、涨跌停约束开关和 `limit_pct`，并保存当前侧栏面板 `active_panel`、导入任务筛选 `import_job_filter`、手工划线 `manual_lines`（兼容 `manualLines`）以及日期范围是否手动触碰状态 `date_range_touched`。
+  - 后端导出规则配置；前端会在 `workspace` 中补充当前标的上下文、图层开关、默认周期、时间范围、主题、波浪浪级、回测策略、回测成本参数、涨跌停约束开关和 `limit_pct`，并保存当前侧栏面板 `active_panel`、导入任务筛选 `import_job_filter`、手工划线 `manual_lines`（兼容 `manualLines`）、手工划线样式 `manual_line_style`（兼容 `manualLineStyle`）以及日期范围是否手动触碰状态 `date_range_touched`。
   - 不导出 `annotations`、`bars_daily`、`bars_minute`、`symbols`、复盘笔记或用户数据源配置。
 - `POST /schemes/analysis`
   - 请求体同 `GET /schemes/analysis` 返回结构。
@@ -230,7 +230,8 @@
   - `workspace.backtest_options` 导出使用 snake_case（如 `fee_bps`、`position_pct`、`apply_limit_constraints`、`limit_pct`）；前端导入时兼容同义 camelCase 字段（如 `feeBps`、`positionPct`、`applyLimitConstraints`、`limitPct`），且 `apply_limit_constraints` / `applyLimitConstraints` 支持布尔字面量及常见布尔字符串/数字（`true` / `false`、`1` / `0`），便于手工编辑或旧方案迁移。
   - `workspace.layers` 只要包含任一受支持图层字段即可导入；布尔字段兼容布尔字面量及常见布尔字符串/数字（`true` / `false`、`1` / `0`），缺少的新图层字段按当前默认显示，避免旧方案隐藏新增分析结果。工作台图层开关也会持久化到本地 `localStorage` 并在刷新后恢复。
   - `workspace.manual_lines` 导出为 snake_case；导入兼容 `manualLines`。`manual_lines` 显式为 `null` 时会清空当前手工划线，字段缺失或非法时保持当前状态；数组元素支持 `start.trade_date` / `end.trade_date`（兼容 `tradeDate`）和 `created_at`（兼容 `createdAt`）。
-  - `workspace.active_panel` 支持 `workbench` / `data` / `layers` / `review` / `settings`；`workspace.import_job_filter` 支持 `all` / `pending` / `failed` / `succeeded` / `broken`。导入时兼容同义 camelCase 字段（`activePanel`、`importJobFilter`），并会自动去除首尾空白、按大小写不敏感匹配；字段缺失或非法时保持当前状态。本地 `localStorage` 恢复时也兼容 `active_panel` / `import_job_filter` 键。
+  - `workspace.manual_line_style` 导出为 snake_case；导入兼容 `manualLineStyle`。`color` 仅接受 `#rrggbb` 格式，`width` 会归一化到 1-4。snake 字段显式为 `null` 时恢复默认划线样式；snake 字段缺失、非对象、颜色非法或粗细非法时继续尝试同义 camelCase 字段 `manualLineStyle`；两者都缺失或非法时保持当前样式。
+  - `workspace.active_panel` 支持 `workbench` / `data` / `layers` / `review` / `learning` / `settings`；`workspace.import_job_filter` 支持 `all` / `pending` / `failed` / `succeeded` / `broken`。导入时兼容同义 camelCase 字段（`activePanel`、`importJobFilter`），并会自动去除首尾空白、按大小写不敏感匹配；字段缺失或非法时保持当前状态。本地 `localStorage` 恢复时也兼容 `active_panel` / `import_job_filter` 键。
   - `workspace.theme` 支持 `light` / `dark`，导入时会自动去除首尾空白并按大小写不敏感匹配；字段缺失或非法时保持当前状态。
   - `workspace.date_range_touched` 支持布尔字面量及常见布尔字符串/数字（`true` / `false`、`1` / `0`），并兼容同义 camelCase 字段 `dateRangeTouched`；字段缺失或非法时保持现有行为（仅当本次导入包含非空且合法的日期边界时，默认视为已手动触碰）。
   - 工作台当前标的、当前周期、日期范围与“是否手动触碰日期范围”状态会持久化到本地 `localStorage` 并在刷新后恢复；若本地值非法则按默认行为回退。日期值恢复时会自动去除首尾空白后再校验。

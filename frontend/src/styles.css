@@ -78,6 +78,10 @@ button {
   overflow: hidden;
 }
 
+.app-shell.learning-page-active {
+  grid-template-columns: 72px minmax(0, 1fr);
+}
+
 .nav-rail {
   display: flex;
   flex-direction: column;
@@ -128,7 +132,7 @@ button {
 
 .panel-tabs {
   display: none;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
   padding: 4px;
   border-radius: 22px;
@@ -485,6 +489,11 @@ button:disabled {
   min-width: 0;
   min-height: 0;
   padding: 18px;
+}
+
+.learning-workspace {
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .top-app-bar {
@@ -1200,6 +1209,79 @@ button:disabled {
   flex-direction: column;
 }
 
+.rule-doc-section-title {
+  margin-top: 4px;
+  color: var(--md-sys-color-on-surface);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.learning-tutorial-heading {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.learning-tutorial-block {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.learning-tutorial-block span {
+  color: var(--md-sys-color-on-surface);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.learning-tutorial-block ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.learning-tutorial-block li {
+  overflow-wrap: anywhere;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.learning-page {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.learning-intro {
+  margin-bottom: 14px;
+}
+
+.learning-category-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.learning-tutorial-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding-bottom: 4px;
+}
+
+.learning-page-card {
+  min-width: 0;
+}
+
 .rule-editor {
   display: flex;
   flex-direction: column;
@@ -1733,6 +1815,10 @@ button:disabled {
     grid-template-columns: 64px 260px minmax(360px, 1fr) 300px;
   }
 
+  .learning-workspace {
+    grid-template-rows: auto auto minmax(0, 1fr);
+  }
+
   .panel-tabs {
     display: grid;
   }
@@ -1742,11 +1828,22 @@ button:disabled {
   .bottom-sheet {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .learning-tutorial-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 860px) {
   .app-shell {
     grid-template-columns: 1fr;
+    height: auto;
+    overflow: visible;
+  }
+
+  .app-shell.learning-page-active {
+    grid-template-columns: 1fr;
+    min-height: 100vh;
   }
 
   .nav-rail {
@@ -1763,6 +1860,13 @@ button:disabled {
 
   .workspace {
     padding-top: 0;
+    grid-template-rows: auto minmax(420px, 58vh) auto;
+    overflow: visible;
+  }
+
+  .learning-workspace {
+    grid-template-rows: auto auto minmax(0, 1fr);
+    overflow: hidden;
   }
 
   .right-pane {
